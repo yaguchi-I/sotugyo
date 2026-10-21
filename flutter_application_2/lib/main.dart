@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'firebase_options.dart';
 import 'screens/auth_screen.dart';
 import 'screens/sns_screen.dart';
@@ -11,11 +13,26 @@ import 'screens/sns_add_screen.dart';
 import 'screens/sns_bookmark_screen.dart';
 import 'screens/cooking_screen.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // 開発中は App Check をデバッグモードで動かす（AI相談室で使用）。
+  // トークンはコードに書かず、実行時に --dart-define で渡す（GitHubに漏らさないため）
+  if (kDebugMode) {
+    const debugToken = String.fromEnvironment('APPCHECK_DEBUG_TOKEN');
+    await FirebaseAppCheck.instance.activate(
+      providerWeb: WebDebugProvider(
+        debugToken: debugToken.isEmpty ? null : debugToken,
+      ),
+      providerAndroid: AndroidDebugProvider(
+        debugToken: debugToken.isEmpty ? null : debugToken,
+      ),
+    );
+  }
+
   runApp(const MyApp());
 }
 
