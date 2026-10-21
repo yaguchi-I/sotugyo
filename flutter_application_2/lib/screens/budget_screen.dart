@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
 import 'dart:io';
 
 class BudgetScreen extends StatefulWidget {
@@ -50,14 +51,18 @@ class _BudgetScreenState extends State<BudgetScreen> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(vertical: 12),
                             decoration: BoxDecoration(
-                              color: isCalendarView ? Colors.blue : Colors.transparent,
+                              color: isCalendarView
+                                  ? Colors.blue
+                                  : Colors.transparent,
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Center(
                               child: Text(
                                 'カレンダー',
                                 style: TextStyle(
-                                  color: isCalendarView ? Colors.white : Colors.black,
+                                  color: isCalendarView
+                                      ? Colors.white
+                                      : Colors.black,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -71,14 +76,18 @@ class _BudgetScreenState extends State<BudgetScreen> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(vertical: 12),
                             decoration: BoxDecoration(
-                              color: !isCalendarView ? Colors.blue : Colors.transparent,
+                              color: !isCalendarView
+                                  ? Colors.blue
+                                  : Colors.transparent,
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Center(
                               child: Text(
                                 '履歴一覧',
                                 style: TextStyle(
-                                  color: !isCalendarView ? Colors.white : Colors.black,
+                                  color: !isCalendarView
+                                      ? Colors.white
+                                      : Colors.black,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -90,9 +99,7 @@ class _BudgetScreenState extends State<BudgetScreen> {
                   ),
                 ),
               ),
-              Expanded(
-                child: isCalendarView ? _buildCalendar() : _buildList(),
-              ),
+              Expanded(child: isCalendarView ? _buildCalendar() : _buildList()),
             ],
           ),
           Positioned(
@@ -114,7 +121,14 @@ class _BudgetScreenState extends State<BudgetScreen> {
               onPressed: () {},
               backgroundColor: Colors.white,
               shape: const CircleBorder(),
-              child: const Text('AI', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.black)),
+              child: const Text(
+                'AI',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Colors.black,
+                ),
+              ),
             ),
           ),
         ],
@@ -124,7 +138,12 @@ class _BudgetScreenState extends State<BudgetScreen> {
 
   Widget _buildCalendar() {
     return GridView.builder(
-      padding: const EdgeInsets.only(left: 16.0, right: 16.0, top: 16.0, bottom: 180.0),
+      padding: const EdgeInsets.only(
+        left: 16.0,
+        right: 16.0,
+        top: 16.0,
+        bottom: 180.0,
+      ),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 7,
         mainAxisSpacing: 4,
@@ -161,7 +180,10 @@ class _BudgetScreenState extends State<BudgetScreen> {
         return ListTile(
           title: const Text('食費'),
           subtitle: Text('10月${index + 1}日'),
-          trailing: const Text('¥2,500', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          trailing: const Text(
+            '¥2,500',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
         );
       },
     );

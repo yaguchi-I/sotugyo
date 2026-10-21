@@ -1,0 +1,272 @@
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import 'sns_reply_screen.dart';
+
+class SnsDetailScreen extends StatelessWidget {
+  final String postId;
+
+  const SnsDetailScreen({super.key, required this.postId});
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('ポスト', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          // ① 親ポストの表示（リアルタイム更新）
+          StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('posts')
+                .doc(postId)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) return const SizedBox();
+
+              final doc = snapshot.data!;
+              if (!doc.exists) return const Center(child: Text('ポストが見つかりません'));
+
+              final post = doc.data() as Map<String, dynamic>;
+              final bool hasImage = post['hasImage'] ?? false;
+              final int replies = post['replies'] ?? 0;
+
+              final List<dynamic> likedUsers = post['likedUsers'] is List
+                  ? post['likedUsers']
+                  : [];
+              final List<dynamic> helpfulUsers = post['helpfulUsers'] is List
+                  ? post['helpfulUsers']
+                  : [];
+
+              final bool isLiked = likedUsers.contains(currentUserId);
+              final bool isHelpful = helpfulUsers.contains(currentUserId);
+
+              return Container(
+                padding: const EdgeInsets.all(16.0),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Colors.grey, width: 0.5),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const CircleAvatar(
+                          backgroundColor: Colors.grey,
+                          child: Icon(Icons.person, color: Colors.white),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          post['userName'] ?? '名無し',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // 詳細画面なので本文の文字を少し大きくしています
+                    Text(
+                      post['content'] ?? '',
+                      style: const TextStyle(fontSize: 18),
+                    ),
+                    if (hasImage) const SizedBox(height: 12),
+                    if (hasImage)
+                      Container(
+                        height: 200,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.image,
+                          size: 50,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    const Divider(),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildActionButton(
+                          icon: Icons.chat_bubble_outline,
+                          color: Colors.black54,
+                          count: replies,
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => SnsReplyScreen(
+                                  postId: postId,
+                                  originalPost: post,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        _buildActionButton(
+                          icon: isLiked
+                              ? Icons.favorite
+                              : Icons.favorite_border,
+                          color: isLiked ? Colors.pink : Colors.black54,
+                          count: likedUsers.length,
+                          onTap: () async {
+                            if (currentUserId.isEmpty) return;
+                            final docRef = FirebaseFirestore.instance
+                                .collection('posts')
+                                .doc(postId);
+                            if (isLiked) {
+                              await docRef.update({
+                                'likedUsers': FieldValue.arrayRemove([
+                                  currentUserId,
+                                ]),
+                              });
+                            } else {
+                              await docRef.update({
+                                'likedUsers': FieldValue.arrayUnion([
+                                  currentUserId,
+                                ]),
+                              });
+                            }
+                          },
+                        ),
+                        _buildActionButton(
+                          icon: isHelpful
+                              ? Icons.thumb_up
+                              : Icons.thumb_up_off_alt,
+                          color: isHelpful ? Colors.blue : Colors.black54,
+                          count: helpfulUsers.length,
+                          onTap: () async {
+                            if (currentUserId.isEmpty) return;
+                            final docRef = FirebaseFirestore.instance
+                                .collection('posts')
+                                .doc(postId);
+                            if (isHelpful) {
+                              await docRef.update({
+                                'helpfulUsers': FieldValue.arrayRemove([
+                                  currentUserId,
+                                ]),
+                              });
+                            } else {
+                              await docRef.update({
+                                'helpfulUsers': FieldValue.arrayUnion([
+                                  currentUserId,
+                                ]),
+                              });
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+
+          // ② 返信（リプライ）一覧の表示
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('posts')
+                  .doc(postId)
+                  .collection('replies')
+                  .orderBy('createdAt', descending: true)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return const Center(child: Text('まだ返信がありません。'));
+                }
+
+                final docs = snapshot.data!.docs;
+
+                return ListView.builder(
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    final reply = docs[index].data() as Map<String, dynamic>;
+                    return Container(
+                      decoration: const BoxDecoration(
+                        border: Border(
+                          bottom: BorderSide(color: Colors.grey, width: 0.5),
+                        ),
+                      ),
+                      padding: const EdgeInsets.all(16.0),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const CircleAvatar(
+                            backgroundColor: Colors.blueAccent,
+                            child: Icon(Icons.person, color: Colors.white),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  reply['userName'] ?? '名無し',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  reply['content'] ?? '',
+                                  style: const TextStyle(fontSize: 15),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required IconData icon,
+    required Color color,
+    required int count,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(width: 4),
+            Text(
+              count > 0 ? count.toString() : '',
+              style: TextStyle(color: color, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
