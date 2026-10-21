@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "46044476059",
+    "project_id": "sotugyo-48080",
+    "storage_bucket": "sotugyo-48080.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:46044476059:android:d149328beebaab48260c3e",
+        "android_client_info": {
+          "package_name": "com.example.flutter_application_2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDZG0WBkQBF7LDBle5mXVGJyj6jCgdq9rI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

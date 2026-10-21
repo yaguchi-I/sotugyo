@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
-
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'firebase_options.dart';
+import 'screens/auth_screen.dart';
 import 'screens/sns_screen.dart';
 import 'screens/budget_screen.dart';
 import 'screens/ai_chat_screen.dart';
@@ -8,7 +11,11 @@ import 'screens/sns_add_screen.dart';
 import 'screens/sns_bookmark_screen.dart';
 import 'screens/cooking_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const MyApp());
 }
 
@@ -23,7 +30,20 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: const MainScreen(),
+      home: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
+          }
+          if (snapshot.hasData) {
+            return const MainScreen();
+          }
+          return const AuthScreen();
+        },
+      ),
     );
   }
 }
@@ -74,6 +94,13 @@ class _MainScreenState extends State<MainScreen> {
               title: const Text('設定'),
               onTap: () {},
             ),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text('ログアウト', style: TextStyle(color: Colors.red)),
+              onTap: () async {
+                await FirebaseAuth.instance.signOut();
+              },
+            ),
           ],
         ),
       ),
@@ -100,13 +127,7 @@ class _MainScreenState extends State<MainScreen> {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(30),
                   border: Border.all(color: Colors.black87, width: 2),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Colors.black12,
-                      blurRadius: 4,
-                      offset: Offset(0, 2),
-                    ),
-                  ],
+                  boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))],
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: SingleChildScrollView(
@@ -119,11 +140,7 @@ class _MainScreenState extends State<MainScreen> {
                       children: [
                         const SizedBox(
                           width: 56,
-                          child: Icon(
-                            Icons.forum_outlined,
-                            size: 28,
-                            color: Colors.black87,
-                          ),
+                          child: Icon(Icons.forum_outlined, size: 28, color: Colors.black87),
                         ),
                         SizedBox(
                           width: 160,
@@ -131,28 +148,16 @@ class _MainScreenState extends State<MainScreen> {
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
                               IconButton(
-                                icon: const Icon(
-                                  Icons.search,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 3),
+                                icon: const Icon(Icons.search, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 3),
                               ),
                               IconButton(
-                                icon: const Icon(
-                                  Icons.add_box_outlined,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 4),
+                                icon: const Icon(Icons.add_box_outlined, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 4),
                               ),
                               IconButton(
-                                icon: const Icon(
-                                  Icons.bookmark_border,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 5),
+                                icon: const Icon(Icons.bookmark_border, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 5),
                               ),
                             ],
                           ),
@@ -183,13 +188,7 @@ class _MainScreenState extends State<MainScreen> {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(30),
                   border: Border.all(color: Colors.black87, width: 2),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Colors.black12,
-                      blurRadius: 4,
-                      offset: Offset(0, 2),
-                    ),
-                  ],
+                  boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))],
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: SingleChildScrollView(
@@ -207,28 +206,16 @@ class _MainScreenState extends State<MainScreen> {
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
                               IconButton(
-                                icon: const Icon(
-                                  Icons.auto_awesome,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 2),
+                                icon: const Icon(Icons.auto_awesome, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 2),
                               ),
                               IconButton(
-                                icon: const Icon(
-                                  Icons.rice_bowl,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 6),
+                                icon: const Icon(Icons.rice_bowl, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 6),
                               ),
                               IconButton(
-                                icon: const Icon(
-                                  Icons.home_outlined,
-                                  color: Colors.black87,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _currentIndex = 1),
+                                icon: const Icon(Icons.home_outlined, color: Colors.black87),
+                                onPressed: () => setState(() => _currentIndex = 1),
                               ),
                             ],
                           ),
@@ -238,11 +225,7 @@ class _MainScreenState extends State<MainScreen> {
                           child: Center(
                             child: Text(
                               'SA',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.black87,
-                              ),
+                              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87),
                             ),
                           ),
                         ),

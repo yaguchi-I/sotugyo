@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class SnsScreen extends StatefulWidget {
   const SnsScreen({super.key});
@@ -8,64 +9,6 @@ class SnsScreen extends StatefulWidget {
 }
 
 class _SnsScreenState extends State<SnsScreen> {
-  final List<Map<String, dynamic>> posts = [
-    {
-      'userName': 'ユーザー1',
-      'content': '今日の夕飯はもやし炒めを作りました。とても安く済んでよかったです。',
-      'hasImage': false,
-      'replies': 2,
-      'likes': 15,
-      'isLiked': false,
-      'helpfuls': 5,
-      'isHelpful': false,
-      'isBookmarked': false,
-    },
-    {
-      'userName': '節約の達人',
-      'content': 'スーパーの特売日をカレンダーに登録しておくと、月の食費が5000円浮きました！おすすめの節約術があれば教えてください！',
-      'hasImage': true,
-      'replies': 8,
-      'likes': 42,
-      'isLiked': false,
-      'helpfuls': 12,
-      'isHelpful': false,
-      'isBookmarked': false,
-    },
-    {
-      'userName': '駆け出しエンジニア',
-      'content': 'AIに相談したら、素晴らしい家計簿のつけ方を教えてもらえました。カテゴリ分けを細かくしすぎないのがコツみたいです。',
-      'hasImage': false,
-      'replies': 0,
-      'likes': 8,
-      'isLiked': false,
-      'helpfuls': 2,
-      'isHelpful': false,
-      'isBookmarked': false,
-    },
-    {
-      'userName': '料理勉強中',
-      'content': '余った野菜で作れるスープのレシピを保存しました。今週末にまとめて作って冷凍しておこうと思います。',
-      'hasImage': true,
-      'replies': 1,
-      'likes': 24,
-      'isLiked': false,
-      'helpfuls': 9,
-      'isHelpful': false,
-      'isBookmarked': false,
-    },
-    {
-      'userName': 'マイホーム目標',
-      'content': '今月の貯金目標達成！このままいけば来年には頭金が貯まりそうです。',
-      'hasImage': false,
-      'replies': 5,
-      'likes': 105,
-      'isLiked': false,
-      'helpfuls': 30,
-      'isHelpful': false,
-      'isBookmarked': false,
-    },
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -82,11 +25,33 @@ class _SnsScreenState extends State<SnsScreen> {
               },
             ),
           ),
-          SliverList(
-            delegate: SliverChildBuilderDelegate((context, index) {
-              final post = posts[index];
-              return _buildPostCard(post, index);
-            }, childCount: posts.length),
+          StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('posts')
+                .orderBy('createdAt', descending: true)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const SliverFillRemaining(
+                  child: Center(child: CircularProgressIndicator()),
+                );
+              }
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const SliverFillRemaining(
+                  child: Center(child: Text('まだ投稿がありません。最初の投稿をしてみましょう！')),
+                );
+              }
+
+              final docs = snapshot.data!.docs;
+
+              return SliverList(
+                delegate: SliverChildBuilderDelegate((context, index) {
+                  final data = docs[index].data() as Map<String, dynamic>;
+                  final docId = docs[index].id;
+                  return _buildPostCard(data, docId);
+                }, childCount: docs.length),
+              );
+            },
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 100)),
         ],
@@ -94,7 +59,12 @@ class _SnsScreenState extends State<SnsScreen> {
     );
   }
 
-  Widget _buildPostCard(Map<String, dynamic> post, int index) {
+  Widget _buildPostCard(Map<String, dynamic> post, String docId) {
+    final bool hasImage = post['hasImage'] ?? false;
+    final int replies = post['replies'] ?? 0;
+    final int likes = post['likes'] ?? 0;
+    final int helpfuls = post['helpfuls'] ?? 0;
+
     return Container(
       decoration: const BoxDecoration(
         border: Border(bottom: BorderSide(color: Colors.grey, width: 0.5)),
@@ -111,7 +81,7 @@ class _SnsScreenState extends State<SnsScreen> {
               ),
               const SizedBox(width: 12),
               Text(
-                post['userName'],
+                post['userName'] ?? '名無し',
                 style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 16,
@@ -120,9 +90,9 @@ class _SnsScreenState extends State<SnsScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          Text(post['content'], style: const TextStyle(fontSize: 15)),
-          if (post['hasImage']) const SizedBox(height: 12),
-          if (post['hasImage'])
+          Text(post['content'] ?? '', style: const TextStyle(fontSize: 15)),
+          if (hasImage) const SizedBox(height: 12),
+          if (hasImage)
             Container(
               height: 200,
               width: double.infinity,
@@ -139,43 +109,34 @@ class _SnsScreenState extends State<SnsScreen> {
               _buildActionButton(
                 icon: Icons.chat_bubble_outline,
                 color: Colors.black54,
-                count: post['replies'],
+                count: replies,
                 onTap: () {},
               ),
               _buildActionButton(
-                icon: post['isLiked'] ? Icons.favorite : Icons.favorite_border,
-                color: post['isLiked'] ? Colors.pink : Colors.black54,
-                count: post['likes'],
-                onTap: () {
-                  setState(() {
-                    post['isLiked'] = !post['isLiked'];
-                    post['likes'] += post['isLiked'] ? 1 : -1;
-                  });
+                icon: Icons.favorite_border,
+                color: Colors.pink,
+                count: likes,
+                onTap: () async {
+                  await FirebaseFirestore.instance
+                      .collection('posts')
+                      .doc(docId)
+                      .update({'likes': FieldValue.increment(1)});
                 },
               ),
               _buildActionButton(
-                icon: post['isHelpful']
-                    ? Icons.thumb_up
-                    : Icons.thumb_up_off_alt,
-                color: post['isHelpful'] ? Colors.blue : Colors.black54,
-                count: post['helpfuls'],
-                onTap: () {
-                  setState(() {
-                    post['isHelpful'] = !post['isHelpful'];
-                    post['helpfuls'] += post['isHelpful'] ? 1 : -1;
-                  });
+                icon: Icons.thumb_up_off_alt,
+                color: Colors.blue,
+                count: helpfuls,
+                onTap: () async {
+                  await FirebaseFirestore.instance
+                      .collection('posts')
+                      .doc(docId)
+                      .update({'helpfuls': FieldValue.increment(1)});
                 },
               ),
               IconButton(
-                icon: Icon(
-                  post['isBookmarked'] ? Icons.bookmark : Icons.bookmark_border,
-                  color: post['isBookmarked'] ? Colors.black87 : Colors.black54,
-                ),
-                onPressed: () {
-                  setState(() {
-                    post['isBookmarked'] = !post['isBookmarked'];
-                  });
-                },
+                icon: const Icon(Icons.bookmark_border, color: Colors.black54),
+                onPressed: () {},
               ),
             ],
           ),
@@ -197,7 +158,7 @@ class _SnsScreenState extends State<SnsScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
         child: Row(
           children: [
-            Icon(icon, color: color, size: 22),
+            Icon(icon, color: Colors.black54, size: 22),
             const SizedBox(width: 4),
             Text(
               count > 0 ? count.toString() : '',
