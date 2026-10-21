@@ -1,57 +1,129 @@
-import 'dart:typed_data';
+import 'dart:io';
 
-import 'package:firebase_ai/firebase_ai.dart';
 import 'package:flutter/material.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../models/receipt_data.dart';
-import '../services/gemini_service.dart';
-
-/// AI相談室：レシートを撮影・選択 → OCR → その内容でAIに相談できる画面
 class AiChatScreen extends StatefulWidget {
-  const AiChatScreen({super.key, this.onReceiptSaved});
-
-  /// 「家計簿に登録」を押したときに呼ばれる（家計簿・DB担当とつなぐ口）
-  final void Function(ReceiptData receipt)? onReceiptSaved;
+  const AiChatScreen({super.key});
 
   @override
   State<AiChatScreen> createState() => _AiChatScreenState();
 }
 
-enum _Sender { user, ai }
-
-class _ChatMessage {
-  final _Sender sender;
-  final String? text;
-  final Uint8List? image;
-  final ReceiptData? receipt;
-
-  const _ChatMessage({required this.sender, this.text, this.image, this.receipt});
-}
-
 class _AiChatScreenState extends State<AiChatScreen> {
-  final _gemini = GeminiService.instance;
-  final _picker = ImagePicker();
-  final _textController = TextEditingController();
-  final _scrollController = ScrollController();
+  static const String _apiKey =
+      'AQ.Ab8RN6Jn2XETWXDUPF1FGrXmKebuBvhnGUhCNInEZglzJVPVSw';
 
-  final List<_ChatMessage> _messages = [
-    const _ChatMessage(
-      sender: _Sender.ai,
-      text: 'レシートを撮影するか、画像を選んでね。内容を読み取って、節約やレシピの相談にのるよ。\n'
-          'もちろん、画像なしで普通に質問してもOK！',
-    ),
-  ];
+  late final GenerativeModel _model;
+  late final ChatSession _chatSession;
 
-  ChatSession? _chat;
-  ReceiptData? _currentReceipt;
+  final TextEditingController _textController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+
+  final List<Map<String, dynamic>> _messages = [];
   bool _isLoading = false;
+  File? _selectedImage;
 
-  static const _quickQuestions = [
-    'どこを節約できる？',
-    'この食材で作れるレシピは？',
-    'もっと安く買う方法は？',
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _model = GenerativeModel(
+      model: 'gemini-3.5-flash',
+      apiKey: _apiKey,
+      systemInstruction: Content.system(
+        'あなたは一人暮らしの若者向けの節約アドバイザーです。'
+        'レシートや冷蔵庫の画像、またはテキストでの質問をもとに、具体的で実践しやすい節約術・レシピ・買い物のコツを提案してください。'
+        '回答は日本語で、スマホで読みやすいよう短めの段落にしてください。'
+        'Markdownの記号は使わず、プレーンテキストで書いてください。',
+      ),
+    );
+    _chatSession = _model.startChat();
+
+    _messages.add({
+      'isUser': false,
+      'text': 'こんにちは！家計のこと、節約レシピ、買い物の悩みなどなんでも相談してね。\nレシートや冷蔵庫の写真を送ってくれてもOKだよ！',
+      'image': null,
+    });
+  }
+
+  Future<void> _pickImage() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+      if (pickedFile != null) {
+        setState(() {
+          _selectedImage = File(pickedFile.path);
+        });
+      }
+    } catch (e) {
+      debugPrint('画像選択エラー: $e');
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _textController.text.trim();
+    if (text.isEmpty && _selectedImage == null) return;
+
+    final imageToSend = _selectedImage;
+
+    setState(() {
+      _messages.add({'isUser': true, 'text': text, 'image': imageToSend});
+      _isLoading = true;
+      _selectedImage = null;
+    });
+    _textController.clear();
+    _scrollToBottom();
+
+    try {
+      final parts = <Part>[];
+      if (text.isNotEmpty) {
+        parts.add(TextPart(text));
+      } else if (imageToSend != null) {
+        parts.add(TextPart('この画像についてアドバイスをお願いします。'));
+      }
+
+      if (imageToSend != null) {
+        final bytes = await imageToSend.readAsBytes();
+        parts.add(DataPart('image/jpeg', bytes));
+      }
+
+      final response = await _chatSession.sendMessage(Content.multi(parts));
+
+      setState(() {
+        _messages.add({
+          'isUser': false,
+          'text': response.text ?? 'ごめんね、うまく答えられなかったみたい。',
+          'image': null,
+        });
+      });
+    } catch (e) {
+      setState(() {
+        _messages.add({
+          'isUser': false,
+          'text': 'エラーが起きました。APIキーが設定されているか確認してね。\n詳細: $e',
+          'image': null,
+        });
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -60,366 +132,173 @@ class _AiChatScreenState extends State<AiChatScreen> {
     super.dispose();
   }
 
-  // ───────── 画像 → OCR ─────────
-
-  Future<void> _pickImage(ImageSource source) async {
-    final XFile? file = await _picker.pickImage(
-      source: source,
-      maxWidth: 1600, // 送信サイズを抑える
-      imageQuality: 85,
-    );
-    if (file == null) return;
-
-    final bytes = await file.readAsBytes();
-    final mimeType = file.mimeType ?? _guessMimeType(file.name);
-
-    _addMessage(_ChatMessage(sender: _Sender.user, image: bytes, text: 'このレシートを読み取って'));
-    setState(() => _isLoading = true);
-
-    try {
-      final receipt = await _gemini.analyzeReceipt(bytes, mimeType);
-
-      if (!receipt.isReceipt) {
-        _addMessage(const _ChatMessage(
-          sender: _Sender.ai,
-          text: 'レシートが見つからなかったみたい。明るい場所で、レシート全体が写るように撮り直してみてね。',
-        ));
-        return;
-      }
-
-      _currentReceipt = receipt;
-      _chat = _gemini.startConsultation(
-        receipt: receipt,
-        imageBytes: bytes,
-        mimeType: mimeType,
-      );
-      _addMessage(_ChatMessage(sender: _Sender.ai, receipt: receipt));
-      _addMessage(const _ChatMessage(
-        sender: _Sender.ai,
-        text: '読み取れたよ！内容が違っていたら教えてね。このレシートについて気になることを聞いてみて。',
-      ));
-    } catch (e) {
-      _addMessage(_ChatMessage(sender: _Sender.ai, text: '読み取りでエラーが起きました: $e'));
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  // ───────── 相談チャット ─────────
-
-  Future<void> _sendText([String? preset]) async {
-    final text = (preset ?? _textController.text).trim();
-    if (text.isEmpty || _isLoading) return;
-
-    _textController.clear();
-    _addMessage(_ChatMessage(sender: _Sender.user, text: text));
-    setState(() => _isLoading = true);
-
-    _chat ??= _gemini.startConsultation();
-
-    try {
-      final response = await _chat!.sendMessage(Content.text(text));
-      _addMessage(_ChatMessage(
-        sender: _Sender.ai,
-        text: response.text ?? '（回答が空でした）',
-      ));
-    } catch (e) {
-      _addMessage(_ChatMessage(sender: _Sender.ai, text: 'エラーが起きました: $e'));
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  void _resetChat() {
-    setState(() {
-      _chat = null;
-      _currentReceipt = null;
-      _messages
-        ..clear()
-        ..add(const _ChatMessage(
-          sender: _Sender.ai,
-          text: '新しい相談を始めよう。レシートを送るか、質問を入力してね。',
-        ));
-    });
-  }
-
-  void _saveReceipt(ReceiptData receipt) {
-    if (widget.onReceiptSaved != null) {
-      widget.onReceiptSaved!(receipt);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('家計簿に登録しました')),
-      );
-    } else {
-      // 家計簿・DBとつなぐまでの仮動作
-      debugPrint('【家計簿登録データ】${receipt.toMap()}');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('家計簿連携は準備中です（データはコンソールに出力）')),
-      );
-    }
-  }
-
-  // ───────── 共通処理 ─────────
-
-  void _addMessage(_ChatMessage message) {
-    if (!mounted) return;
-    setState(() => _messages.add(message));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  String _guessMimeType(String fileName) {
-    final lower = fileName.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.heic')) return 'image/heic';
-    return 'image/jpeg';
-  }
-
-  // ───────── UI ─────────
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('AI相談室'),
-        actions: [
-          IconButton(
-            tooltip: '新しい相談',
-            icon: const Icon(Icons.refresh),
-            onPressed: _isLoading ? null : _resetChat,
-          ),
-        ],
+        title: const Text(
+          'AI節約アドバイザー',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
       ),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
-              padding: const EdgeInsets.all(12),
-              itemCount: _messages.length + (_isLoading ? 1 : 0),
+              padding: const EdgeInsets.only(
+                left: 16.0,
+                right: 16.0,
+                top: 16.0,
+                bottom: 120.0,
+              ),
+              itemCount: _messages.length,
               itemBuilder: (context, index) {
-                if (index == _messages.length) return const _TypingBubble();
-                return _buildMessage(_messages[index]);
+                final message = _messages[index];
+                return _buildMessageBubble(
+                  text: message['text'],
+                  isUser: message['isUser'],
+                  imageFile: message['image'],
+                );
               },
             ),
           ),
-          if (_currentReceipt != null && !_isLoading) _buildQuickQuestions(),
-          _buildInputBar(),
+          if (_isLoading)
+            const Padding(
+              padding: EdgeInsets.all(8.0),
+              child: CircularProgressIndicator(),
+            ),
+          _buildMessageInput(),
         ],
       ),
     );
   }
 
-  Widget _buildMessage(_ChatMessage message) {
-    final isUser = message.sender == _Sender.user;
-    final colors = Theme.of(context).colorScheme;
-
-    Widget content;
-    if (message.receipt != null) {
-      content = _ReceiptCard(
-        receipt: message.receipt!,
-        onSave: () => _saveReceipt(message.receipt!),
-      );
-    } else {
-      content = Container(
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-        padding: const EdgeInsets.all(12),
+  Widget _buildMessageBubble({
+    required String text,
+    required bool isUser,
+    File? imageFile,
+  }) {
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 6.0),
+        padding: const EdgeInsets.all(12.0),
         decoration: BoxDecoration(
-          color: isUser ? colors.primaryContainer : Colors.grey.shade200,
-          borderRadius: BorderRadius.circular(16),
+          color: isUser ? Colors.blue.shade100 : Colors.grey.shade200,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(20),
+            topRight: const Radius.circular(20),
+            bottomLeft: isUser
+                ? const Radius.circular(20)
+                : const Radius.circular(0),
+            bottomRight: isUser
+                ? const Radius.circular(0)
+                : const Radius.circular(20),
+          ),
+        ),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (message.image != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.memory(message.image!, height: 180, fit: BoxFit.cover),
-                ),
+            if (imageFile != null)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.file(imageFile, fit: BoxFit.cover),
               ),
-            if (message.text != null)
-              SelectableText(message.text!, style: const TextStyle(fontSize: 15)),
-          ],
-        ),
-      );
-    }
-
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: content),
-    );
-  }
-
-  Widget _buildQuickQuestions() {
-    return SizedBox(
-      height: 44,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        itemCount: _quickQuestions.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) => ActionChip(
-          label: Text(_quickQuestions[index]),
-          onPressed: () => _sendText(_quickQuestions[index]),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInputBar() {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        // メイン画面下部の丸ボタン（SNS / SA）と重ならないように余白をとる
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 100),
-        child: Row(
-          children: [
-            IconButton(
-              tooltip: 'カメラで撮る',
-              icon: const Icon(Icons.photo_camera_outlined),
-              onPressed: _isLoading ? null : () => _pickImage(ImageSource.camera),
-            ),
-            IconButton(
-              tooltip: '画像を選ぶ',
-              icon: const Icon(Icons.photo_library_outlined),
-              onPressed: _isLoading ? null : () => _pickImage(ImageSource.gallery),
-            ),
-            Expanded(
-              child: TextField(
-                controller: _textController,
-                enabled: !_isLoading,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _sendText(),
-                decoration: InputDecoration(
-                  hintText: 'AIに相談する',
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                ),
+            if (imageFile != null && text.isNotEmpty) const SizedBox(height: 8),
+            if (text.isNotEmpty)
+              Text(
+                text,
+                style: const TextStyle(fontSize: 15, color: Colors.black87),
               ),
-            ),
-            IconButton(
-              tooltip: '送信',
-              icon: const Icon(Icons.send),
-              onPressed: _isLoading ? null : _sendText,
-            ),
           ],
         ),
       ),
     );
   }
-}
 
-/// 読み取り結果を表示するカード
-class _ReceiptCard extends StatelessWidget {
-  const _ReceiptCard({required this.receipt, required this.onSave});
-
-  final ReceiptData receipt;
-  final VoidCallback onSave;
-
-  @override
-  Widget build(BuildContext context) {
-    final d = receipt.date;
-    final dateText = d == null
-        ? '日付不明'
-        : '${d.year}/${d.month.toString().padLeft(2, '0')}/${d.day.toString().padLeft(2, '0')}';
-
-    return SizedBox(
-      width: MediaQuery.of(context).size.width * 0.8,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.receipt_long, size: 20),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      receipt.store ?? '店名不明',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+  Widget _buildMessageInput() {
+    return Container(
+      padding: const EdgeInsets.only(
+        left: 12.0,
+        right: 12.0,
+        top: 8.0,
+        bottom: 100.0,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_selectedImage != null)
+            Stack(
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  height: 80,
+                  width: 80,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    image: DecorationImage(
+                      image: FileImage(_selectedImage!),
+                      fit: BoxFit.cover,
                     ),
                   ),
-                  if (receipt.category != null) Chip(label: Text(receipt.category!)),
-                ],
-              ),
-              Text(dateText, style: TextStyle(color: Colors.grey.shade700)),
-              const Divider(),
-              for (final item in receipt.items)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(item.name)),
-                      Text('${item.price}円'),
-                    ],
+                ),
+                Positioned(
+                  top: -8,
+                  right: -8,
+                  child: IconButton(
+                    icon: const Icon(Icons.cancel, color: Colors.black54),
+                    onPressed: () => setState(() => _selectedImage = null),
                   ),
                 ),
-              const Divider(),
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('合計', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                  Text(
-                    '${receipt.totalOrSum}円',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                  ),
-                ],
+              ],
+            ),
+          Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.image_outlined, color: Colors.blue),
+                onPressed: _pickImage,
               ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                  onPressed: onSave,
-                  icon: const Icon(Icons.savings_outlined),
-                  label: const Text('家計簿に登録'),
+              Expanded(
+                child: TextField(
+                  controller: _textController,
+                  maxLines: null,
+                  decoration: InputDecoration(
+                    hintText: 'AIに相談する...',
+                    filled: true,
+                    fillColor: Colors.grey.shade100,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              CircleAvatar(
+                backgroundColor: Colors.blue,
+                radius: 20,
+                child: IconButton(
+                  icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                  onPressed: _sendMessage,
                 ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// AIが考え中のときの表示
-class _TypingBubble extends StatelessWidget {
-  const _TypingBubble();
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade200,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-            SizedBox(width: 10),
-            Text('考え中...'),
-          ],
-        ),
+        ],
       ),
     );
   }

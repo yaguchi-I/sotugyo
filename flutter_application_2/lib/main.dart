@@ -1,8 +1,7 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_app_check/firebase_app_check.dart';
+
 import 'firebase_options.dart';
 import 'screens/auth_screen.dart';
 import 'screens/sns_screen.dart';
@@ -13,26 +12,9 @@ import 'screens/sns_add_screen.dart';
 import 'screens/sns_bookmark_screen.dart';
 import 'screens/cooking_screen.dart';
 
-Future<void> main() async {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-
-  // 開発中は App Check をデバッグモードで動かす（AI相談室で使用）。
-  // トークンはコードに書かず、実行時に --dart-define で渡す（GitHubに漏らさないため）
-  if (kDebugMode) {
-    const debugToken = String.fromEnvironment('APPCHECK_DEBUG_TOKEN');
-    await FirebaseAppCheck.instance.activate(
-      providerWeb: WebDebugProvider(
-        debugToken: debugToken.isEmpty ? null : debugToken,
-      ),
-      providerAndroid: AndroidDebugProvider(
-        debugToken: debugToken.isEmpty ? null : debugToken,
-      ),
-    );
-  }
-
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const MyApp());
 }
 
@@ -144,7 +126,13 @@ class _MainScreenState extends State<MainScreen> {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(30),
                   border: Border.all(color: Colors.black87, width: 2),
-                  boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))],
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: SingleChildScrollView(
@@ -157,7 +145,11 @@ class _MainScreenState extends State<MainScreen> {
                       children: [
                         const SizedBox(
                           width: 56,
-                          child: Icon(Icons.forum_outlined, size: 28, color: Colors.black87),
+                          child: Icon(
+                            Icons.forum_outlined,
+                            size: 28,
+                            color: Colors.black87,
+                          ),
                         ),
                         SizedBox(
                           width: 160,
@@ -165,16 +157,28 @@ class _MainScreenState extends State<MainScreen> {
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.search, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 3),
+                                icon: const Icon(
+                                  Icons.search,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 3),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.add_box_outlined, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 4),
+                                icon: const Icon(
+                                  Icons.add_box_outlined,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 4),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.bookmark_border, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 5),
+                                icon: const Icon(
+                                  Icons.bookmark_border,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 5),
                               ),
                             ],
                           ),
@@ -205,7 +209,13 @@ class _MainScreenState extends State<MainScreen> {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(30),
                   border: Border.all(color: Colors.black87, width: 2),
-                  boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))],
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: SingleChildScrollView(
@@ -223,16 +233,28 @@ class _MainScreenState extends State<MainScreen> {
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.auto_awesome, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 2),
+                                icon: const Icon(
+                                  Icons.auto_awesome,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 2),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.rice_bowl, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 6),
+                                icon: const Icon(
+                                  Icons.rice_bowl,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 6),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.home_outlined, color: Colors.black87),
-                                onPressed: () => setState(() => _currentIndex = 1),
+                                icon: const Icon(
+                                  Icons.home_outlined,
+                                  color: Colors.black87,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _currentIndex = 1),
                               ),
                             ],
                           ),
@@ -242,7 +264,11 @@ class _MainScreenState extends State<MainScreen> {
                           child: Center(
                             child: Text(
                               'SA',
-                              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87),
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.black87,
+                              ),
                             ),
                           ),
                         ),
