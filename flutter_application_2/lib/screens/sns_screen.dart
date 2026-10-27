@@ -82,6 +82,9 @@ class _SnsScreenState extends State<SnsScreen> {
     final List<dynamic> savedUsers = post['savedUsers'] != null
         ? List<dynamic>.from(post['savedUsers'])
         : [];
+    final List<dynamic> bookmarkedUsers = post['bookmarkedUsers'] is List
+        ? post['bookmarkedUsers']
+        : [];
 
     final bool isLiked = likedUsers.contains(currentUserId);
     final bool isHelpful = helpfulUsers.contains(currentUserId);
@@ -221,6 +224,39 @@ class _SnsScreenState extends State<SnsScreen> {
         ),
       ),
     );
+  }
+
+  /// 投稿の保存（ブックマーク）を切り替える。
+  /// いいね・参考になったと同じく、投稿ドキュメントの bookmarkedUsers 配列に
+  /// 自分の uid を出し入れする。
+  /// 保存済み一覧では where('bookmarkedUsers', arrayContains: uid) で取得できる。
+  Future<void> _toggleBookmark(String docId, bool isBookmarked) async {
+    if (currentUserId.isEmpty) return;
+
+    final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
+
+    try {
+      await docRef.update({
+        'bookmarkedUsers': isBookmarked
+            ? FieldValue.arrayRemove([currentUserId])
+            : FieldValue.arrayUnion([currentUserId]),
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(isBookmarked ? '保存を解除しました' : '保存しました'),
+            duration: const Duration(seconds: 1),
+          ),
+        );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存に失敗しました: $e')),
+      );
+    }
   }
 
   Widget _buildActionButton({
