@@ -40,6 +40,7 @@ dependencies:
   cloud_firestore: ^7.0.0
   firebase_auth: ^7.0.0
   google_generative_ai: ^0.4.7
+  google_mlkit_text_recognition: ^0.17.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

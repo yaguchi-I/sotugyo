@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import 'sns_reply_screen.dart';
+import 'sns_detail_screen.dart';
 
 class SnsScreen extends StatefulWidget {
   const SnsScreen({super.key});
@@ -72,121 +73,152 @@ class _SnsScreenState extends State<SnsScreen> {
     final bool hasImage = post['hasImage'] ?? false;
     final int replies = post['replies'] ?? 0;
 
-    final List<dynamic> likedUsers = post['likedUsers'] is List
-        ? post['likedUsers']
+    final List<dynamic> likedUsers = post['likedUsers'] != null
+        ? List<dynamic>.from(post['likedUsers'])
         : [];
-    final List<dynamic> helpfulUsers = post['helpfulUsers'] is List
-        ? post['helpfulUsers']
+    final List<dynamic> helpfulUsers = post['helpfulUsers'] != null
+        ? List<dynamic>.from(post['helpfulUsers'])
+        : [];
+    final List<dynamic> savedUsers = post['savedUsers'] != null
+        ? List<dynamic>.from(post['savedUsers'])
         : [];
 
     final bool isLiked = likedUsers.contains(currentUserId);
     final bool isHelpful = helpfulUsers.contains(currentUserId);
+    final bool isSaved = savedUsers.contains(currentUserId);
 
     final int likesCount = likedUsers.length;
     final int helpfulsCount = helpfulUsers.length;
 
-    return Container(
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.grey, width: 0.5)),
-      ),
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const CircleAvatar(
-                backgroundColor: Colors.grey,
-                child: Icon(Icons.person, color: Colors.white),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                post['userName'] ?? '名無し',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
+    return InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => SnsDetailScreen(postId: docId),
+          ),
+        );
+      },
+      child: Container(
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: Colors.grey, width: 0.5)),
+        ),
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const CircleAvatar(
+                  backgroundColor: Colors.grey,
+                  child: Icon(Icons.person, color: Colors.white),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(post['content'] ?? '', style: const TextStyle(fontSize: 15)),
-          if (hasImage) const SizedBox(height: 12),
-          if (hasImage)
-            Container(
-              height: 200,
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(Icons.image, size: 50, color: Colors.grey),
+                const SizedBox(width: 12),
+                Text(
+                  post['userName'] ?? '名無し',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
             ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: [
-              _buildActionButton(
-                icon: Icons.chat_bubble_outline,
-                color: Colors.black54,
-                count: replies,
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          SnsReplyScreen(postId: docId, originalPost: post),
-                    ),
-                  );
-                },
+            const SizedBox(height: 12),
+            Text(post['content'] ?? '', style: const TextStyle(fontSize: 15)),
+            if (hasImage) const SizedBox(height: 12),
+            if (hasImage)
+              Container(
+                height: 200,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.image, size: 50, color: Colors.grey),
               ),
-              _buildActionButton(
-                icon: isLiked ? Icons.favorite : Icons.favorite_border,
-                color: isLiked ? Colors.pink : Colors.black54,
-                count: likesCount,
-                onTap: () async {
-                  if (currentUserId.isEmpty) return;
-                  final docRef = FirebaseFirestore.instance
-                      .collection('posts')
-                      .doc(docId);
-                  if (isLiked) {
-                    await docRef.update({
-                      'likedUsers': FieldValue.arrayRemove([currentUserId]),
-                    });
-                  } else {
-                    await docRef.update({
-                      'likedUsers': FieldValue.arrayUnion([currentUserId]),
-                    });
-                  }
-                },
-              ),
-              _buildActionButton(
-                icon: isHelpful ? Icons.thumb_up : Icons.thumb_up_off_alt,
-                color: isHelpful ? Colors.blue : Colors.black54,
-                count: helpfulsCount,
-                onTap: () async {
-                  if (currentUserId.isEmpty) return;
-                  final docRef = FirebaseFirestore.instance
-                      .collection('posts')
-                      .doc(docId);
-                  if (isHelpful) {
-                    await docRef.update({
-                      'helpfulUsers': FieldValue.arrayRemove([currentUserId]),
-                    });
-                  } else {
-                    await docRef.update({
-                      'helpfulUsers': FieldValue.arrayUnion([currentUserId]),
-                    });
-                  }
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.bookmark_border, color: Colors.black54),
-                onPressed: () {},
-              ),
-            ],
-          ),
-        ],
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildActionButton(
+                  icon: Icons.chat_bubble_outline,
+                  color: Colors.black54,
+                  count: replies,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            SnsReplyScreen(postId: docId, originalPost: post),
+                      ),
+                    );
+                  },
+                ),
+                _buildActionButton(
+                  icon: isLiked ? Icons.favorite : Icons.favorite_border,
+                  color: isLiked ? Colors.pink : Colors.black54,
+                  count: likesCount,
+                  onTap: () {
+                    if (currentUserId.isEmpty) return;
+                    final docRef = FirebaseFirestore.instance
+                        .collection('posts')
+                        .doc(docId);
+                    if (isLiked) {
+                      docRef.update({
+                        'likedUsers': FieldValue.arrayRemove([currentUserId]),
+                      });
+                    } else {
+                      docRef.update({
+                        'likedUsers': FieldValue.arrayUnion([currentUserId]),
+                      });
+                    }
+                  },
+                ),
+                _buildActionButton(
+                  icon: isHelpful ? Icons.thumb_up : Icons.thumb_up_off_alt,
+                  color: isHelpful ? Colors.blue : Colors.black54,
+                  count: helpfulsCount,
+                  onTap: () {
+                    if (currentUserId.isEmpty) return;
+                    final docRef = FirebaseFirestore.instance
+                        .collection('posts')
+                        .doc(docId);
+                    if (isHelpful) {
+                      docRef.update({
+                        'helpfulUsers': FieldValue.arrayRemove([currentUserId]),
+                      });
+                    } else {
+                      docRef.update({
+                        'helpfulUsers': FieldValue.arrayUnion([currentUserId]),
+                      });
+                    }
+                  },
+                ),
+                IconButton(
+                  icon: Icon(
+                    isSaved ? Icons.bookmark : Icons.bookmark_border,
+                    color: isSaved ? Colors.blue : Colors.black54,
+                  ),
+                  onPressed: () {
+                    if (currentUserId.isEmpty) return;
+                    final docRef = FirebaseFirestore.instance
+                        .collection('posts')
+                        .doc(docId);
+                    if (isSaved) {
+                      docRef.update({
+                        'savedUsers': FieldValue.arrayRemove([currentUserId]),
+                      });
+                    } else {
+                      docRef.update({
+                        'savedUsers': FieldValue.arrayUnion([currentUserId]),
+                      });
+                    }
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
