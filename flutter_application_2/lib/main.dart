@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-
 import 'firebase_options.dart';
 import 'screens/auth_screen.dart';
 import 'screens/sns_screen.dart';
@@ -9,7 +8,7 @@ import 'screens/budget_screen.dart';
 import 'screens/ai_chat_screen.dart';
 import 'screens/sns_search_screen.dart';
 import 'screens/sns_add_screen.dart';
-import 'screens/sns_bookmark_screen.dart';
+import 'screens/sns_bookmark_screen.dart'; // ★「hide AiChatScreen」を削除して正常化
 import 'screens/cooking_screen.dart';
 
 void main() async {

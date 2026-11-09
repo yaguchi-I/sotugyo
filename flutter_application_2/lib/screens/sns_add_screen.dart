@@ -18,6 +18,18 @@ class _SnsAddScreenState extends State<SnsAddScreen> {
   bool _isPickingImage = false;
   File? _image;
 
+  final List<String> _mainCategories = ['指定なし', '料理', '掃除', '収納', 'その他'];
+  final Map<String, List<String>> _subCategories = {
+    '指定なし': ['指定なし'],
+    '料理': ['野菜', '肉類', '麺類', '作り置き', 'その他'],
+    '掃除': ['キッチン', 'お風呂', 'トイレ', 'リビング', 'その他'],
+    '収納': ['クローゼット', 'デスク周り', '小物', 'その他'],
+    'その他': ['その他'],
+  };
+
+  String _selectedMainCategory = '指定なし';
+  String _selectedSubCategory = '指定なし';
+
   Future<void> _pickImage() async {
     if (_isPickingImage) return;
 
@@ -59,6 +71,8 @@ class _SnsAddScreenState extends State<SnsAddScreen> {
         'userName': userName,
         'content': _contentController.text,
         'hasImage': _image != null,
+        'mainCategory': _selectedMainCategory,
+        'subCategory': _selectedSubCategory,
         'replies': 0,
         'likes': 0,
         'helpfuls': 0,
@@ -68,7 +82,14 @@ class _SnsAddScreenState extends State<SnsAddScreen> {
       _contentController.clear();
       setState(() {
         _image = null;
+        _selectedMainCategory = '指定なし';
+        _selectedSubCategory = '指定なし';
       });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('投稿しました！')));
+      FocusScope.of(context).unfocus();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -136,59 +157,131 @@ class _SnsAddScreenState extends State<SnsAddScreen> {
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
-              child: Row(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const CircleAvatar(
-                    backgroundColor: Colors.grey,
-                    child: Icon(Icons.person, color: Colors.white),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        TextField(
-                          controller: _contentController,
-                          maxLines: null,
-                          decoration: const InputDecoration(
-                            hintText: 'いまどうしてる？',
-                            border: InputBorder.none,
-                          ),
-                        ),
-                        if (_image != null) const SizedBox(height: 12),
-                        if (_image != null)
-                          Stack(
-                            children: [
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(16),
-                                child: Image.file(_image!, fit: BoxFit.cover),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const CircleAvatar(
+                        backgroundColor: Colors.grey,
+                        child: Icon(Icons.person, color: Colors.white),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            TextField(
+                              controller: _contentController,
+                              maxLines: null,
+                              decoration: const InputDecoration(
+                                hintText: 'いまどうしてる？',
+                                border: InputBorder.none,
                               ),
-                              Positioned(
-                                top: 8,
-                                right: 8,
-                                child: GestureDetector(
-                                  onTap: () {
-                                    setState(() {
-                                      _image = null;
-                                    });
-                                  },
-                                  child: const CircleAvatar(
-                                    backgroundColor: Colors.black54,
-                                    radius: 14,
-                                    child: Icon(
-                                      Icons.close,
-                                      color: Colors.white,
-                                      size: 18,
+                            ),
+                            if (_image != null) const SizedBox(height: 12),
+                            if (_image != null)
+                              Stack(
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Image.file(
+                                      _image!,
+                                      fit: BoxFit.cover,
                                     ),
                                   ),
-                                ),
+                                  Positioned(
+                                    top: 8,
+                                    right: 8,
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _image = null;
+                                        });
+                                      },
+                                      child: const CircleAvatar(
+                                        backgroundColor: Colors.black54,
+                                        radius: 14,
+                                        child: Icon(
+                                          Icons.close,
+                                          color: Colors.white,
+                                          size: 18,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                      ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  const Divider(),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8.0),
+                    child: Text(
+                      'タグを選択',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
                     ),
                   ),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: _mainCategories.map((main) {
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 8.0),
+                          child: ChoiceChip(
+                            label: Text(main),
+                            selected: _selectedMainCategory == main,
+                            selectedColor: Colors.blue.shade100,
+                            onSelected: (selected) {
+                              if (selected) {
+                                setState(() {
+                                  _selectedMainCategory = main;
+                                  _selectedSubCategory =
+                                      _subCategories[main]!.first;
+                                });
+                                FocusScope.of(context).unfocus();
+                              }
+                            },
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_selectedMainCategory != '指定なし')
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: _subCategories[_selectedMainCategory]!.map((
+                          sub,
+                        ) {
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 8.0),
+                            child: ChoiceChip(
+                              label: Text(sub),
+                              selected: _selectedSubCategory == sub,
+                              selectedColor: Colors.green.shade100,
+                              onSelected: (selected) {
+                                if (selected) {
+                                  setState(() {
+                                    _selectedSubCategory = sub;
+                                  });
+                                  FocusScope.of(context).unfocus();
+                                }
+                              },
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
                 ],
               ),
             ),
