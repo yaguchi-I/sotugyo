@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import 'sns_detail_screen.dart';
+import 'ai_recipe_detail_screen.dart';
+
 class SnsBookmarkScreen extends StatefulWidget {
   const SnsBookmarkScreen({super.key});
 
@@ -14,13 +17,14 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
   late TabController _tabController;
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-  final List<String> _mainTabs = ['すべて', '料理', '掃除', '収納'];
+  final List<String> _mainTabs = ['すべて', '料理', '掃除', '収納', 'AI'];
 
   final Map<String, List<String>> _subTags = {
     'すべて': [],
     '料理': ['すべて', '野菜', '肉類', '麺類', '作り置き'],
     '掃除': ['すべて', 'キッチン', 'お風呂', 'トイレ', 'リビング'],
     '収納': ['すべて', 'クローゼット', 'デスク周り', '小物'],
+    'AI': ['すべて', 'レシピ', '節約術', 'その他'],
   };
 
   String _selectedSubTag = 'すべて';
@@ -118,68 +122,94 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
         final data = docs[index].data() as Map<String, dynamic>;
         final docId = docs[index].id;
 
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              CircleAvatar(
-                backgroundColor: Colors.blue.shade100,
-                child: const Icon(Icons.person, color: Colors.white),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      data['userName'] ?? '名無し',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      data['content'] ?? '',
-                      style: const TextStyle(fontSize: 15, height: 1.4),
-                    ),
-                    if (data['hasImage'] == true) ...[
-                      const SizedBox(height: 12),
-                      Container(
-                        height: 150,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade300,
-                          borderRadius: BorderRadius.circular(12),
+        return InkWell(
+          onTap: () {
+            if (data['mainCategory'] == 'AI') {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => AiRecipeDetailScreen(postId: docId),
+                ),
+              );
+            } else {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => SnsDetailScreen(postId: docId),
+                ),
+              );
+            }
+          },
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  backgroundColor: data['mainCategory'] == 'AI'
+                      ? Colors.purple.shade100
+                      : Colors.blue.shade100,
+                  child: Icon(
+                    data['mainCategory'] == 'AI'
+                        ? Icons.auto_awesome
+                        : Icons.person,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        data['userName'] ?? '名無し',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
                         ),
-                        child: const Icon(
-                          Icons.image,
-                          color: Colors.grey,
-                          size: 40,
-                        ),
                       ),
-                    ],
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        IconButton(
-                          icon: const Icon(
-                            Icons.bookmark,
-                            color: Colors.blue,
-                            size: 20,
+                      const SizedBox(height: 4),
+                      Text(
+                        data['content'] ?? '',
+                        style: const TextStyle(fontSize: 15, height: 1.4),
+                      ),
+                      if (data['hasImage'] == true) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          height: 150,
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                          onPressed: () => _toggleSave(docId),
-                          constraints: const BoxConstraints(),
-                          padding: EdgeInsets.zero,
+                          child: const Icon(
+                            Icons.image,
+                            color: Colors.grey,
+                            size: 40,
+                          ),
                         ),
                       ],
-                    ),
-                  ],
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          IconButton(
+                            icon: const Icon(
+                              Icons.bookmark,
+                              color: Colors.blue,
+                              size: 20,
+                            ),
+                            onPressed: () => _toggleSave(docId),
+                            constraints: const BoxConstraints(),
+                            padding: EdgeInsets.zero,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
@@ -252,7 +282,25 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
                       ),
                       clipBehavior: Clip.antiAlias,
                       child: InkWell(
-                        onTap: () {},
+                        onTap: () {
+                          if (data['mainCategory'] == 'AI') {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    AiRecipeDetailScreen(postId: docId),
+                              ),
+                            );
+                          } else {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    SnsDetailScreen(postId: docId),
+                              ),
+                            );
+                          }
+                        },
                         child: Row(
                           children: [
                             Container(
@@ -264,6 +312,8 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
                                     ? Icons.restaurant
                                     : data['mainCategory'] == '掃除'
                                     ? Icons.cleaning_services
+                                    : data['mainCategory'] == 'AI'
+                                    ? Icons.auto_awesome
                                     : Icons.inventory_2,
                                 color: Colors.grey.shade400,
                               ),
@@ -302,7 +352,9 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
                                           vertical: 2,
                                         ),
                                         decoration: BoxDecoration(
-                                          color: Colors.blue.shade50,
+                                          color: data['mainCategory'] == 'AI'
+                                              ? Colors.purple.shade50
+                                              : Colors.blue.shade50,
                                           borderRadius: BorderRadius.circular(
                                             4,
                                           ),
@@ -311,7 +363,9 @@ class _SnsBookmarkScreenState extends State<SnsBookmarkScreen>
                                           data['mainCategory'] ?? '未分類',
                                           style: TextStyle(
                                             fontSize: 11,
-                                            color: Colors.blue.shade700,
+                                            color: data['mainCategory'] == 'AI'
+                                                ? Colors.purple.shade700
+                                                : Colors.blue.shade700,
                                           ),
                                         ),
                                       ),

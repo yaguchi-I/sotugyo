@@ -48,7 +48,16 @@ class _SnsScreenState extends State<SnsScreen> {
                 );
               }
 
-              final docs = snapshot.data!.docs;
+              final docs = snapshot.data!.docs.where((doc) {
+                final data = doc.data() as Map<String, dynamic>;
+                return data['mainCategory'] != 'AI';
+              }).toList();
+
+              if (docs.isEmpty) {
+                return const SliverFillRemaining(
+                  child: Center(child: Text('まだ投稿がありません。最初の投稿をしてみましょう！')),
+                );
+              }
 
               return SliverList(
                 delegate: SliverChildBuilderDelegate((context, index) {
@@ -82,9 +91,6 @@ class _SnsScreenState extends State<SnsScreen> {
     final List<dynamic> savedUsers = post['savedUsers'] != null
         ? List<dynamic>.from(post['savedUsers'])
         : [];
-    final List<dynamic> bookmarkedUsers = post['bookmarkedUsers'] is List
-        ? post['bookmarkedUsers']
-        : [];
 
     final bool isLiked = likedUsers.contains(currentUserId);
     final bool isHelpful = helpfulUsers.contains(currentUserId);
@@ -111,17 +117,65 @@ class _SnsScreenState extends State<SnsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const CircleAvatar(
                   backgroundColor: Colors.grey,
                   child: Icon(Icons.person, color: Colors.white),
                 ),
                 const SizedBox(width: 12),
-                Text(
-                  post['userName'] ?? '名無し',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
+                Expanded(
+                  child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8.0,
+                    runSpacing: 4.0,
+                    children: [
+                      Text(
+                        post['userName'] ?? '名無し',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      if (post['mainCategory'] != null &&
+                          post['mainCategory'] != '指定なし')
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            post['mainCategory'],
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.blue.shade700,
+                            ),
+                          ),
+                        ),
+                      if (post['subCategory'] != null &&
+                          post['subCategory'] != '指定なし')
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade50,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            post['subCategory'],
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.green.shade700,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ],
@@ -224,39 +278,6 @@ class _SnsScreenState extends State<SnsScreen> {
         ),
       ),
     );
-  }
-
-  /// 投稿の保存（ブックマーク）を切り替える。
-  /// いいね・参考になったと同じく、投稿ドキュメントの bookmarkedUsers 配列に
-  /// 自分の uid を出し入れする。
-  /// 保存済み一覧では where('bookmarkedUsers', arrayContains: uid) で取得できる。
-  Future<void> _toggleBookmark(String docId, bool isBookmarked) async {
-    if (currentUserId.isEmpty) return;
-
-    final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
-
-    try {
-      await docRef.update({
-        'bookmarkedUsers': isBookmarked
-            ? FieldValue.arrayRemove([currentUserId])
-            : FieldValue.arrayUnion([currentUserId]),
-      });
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(isBookmarked ? '保存を解除しました' : '保存しました'),
-            duration: const Duration(seconds: 1),
-          ),
-        );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('保存に失敗しました: $e')),
-      );
-    }
   }
 
   Widget _buildActionButton({
