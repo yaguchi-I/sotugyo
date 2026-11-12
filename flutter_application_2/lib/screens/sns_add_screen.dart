@@ -76,6 +76,10 @@ class _SnsAddScreenState extends State<SnsAddScreen> {
         'replies': 0,
         'likes': 0,
         'helpfuls': 0,
+        // 👇 ここを足すだけで、sns_screenと完全に連動します！
+        'likedUsers': [],
+        'helpfulUsers': [],
+        'savedUsers': [],
         'createdAt': FieldValue.serverTimestamp(),
       });
 
