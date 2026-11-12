@@ -9,20 +9,20 @@ import 'package:firebase_auth/firebase_auth.dart';
 class AiChatScreen extends StatefulWidget {
   const AiChatScreen({super.key});
 
+  static const String apiKey = '';
+
   @override
-  State<AiChatScreen> createState() => _AiChatScreenState();
+  State createState() => _AiChatScreenState();
 }
 
-class _AiChatScreenState extends State<AiChatScreen> {
-  static const String _apiKey = '';
-
+class _AiChatScreenState extends State {
   final String _currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
 
   bool _isCheckingSetup = true;
   bool _isSetupComplete = false;
 
   final TextEditingController _areaController = TextEditingController();
-  final List<String> _cookingAppliances = [
+  final List _cookingAppliances = [
     '電子レンジ',
     'オーブン',
     '炊飯器',
@@ -31,15 +31,37 @@ class _AiChatScreenState extends State<AiChatScreen> {
     'ミキサー',
     '冷蔵庫',
   ];
-  final List<String> _missingAppliances = [];
+  final List _missingAppliances = [];
   String _userArea = '';
+  String _userName = 'あなた';
+
+  final List _quickPrompts = [
+    {
+      'label': '🍳 150円以下のスピード飯',
+      'prompt': '150円以下で10分以内に作れる、洗い物が少ない節約レシピを教えて！',
+    },
+    {
+      'label': '🥬 冷蔵庫の余り物で1品',
+      'prompt': '一人暮らしの冷蔵庫に余りがちな食材（卵やもやし、キャベツなど）を使った簡単おかずを教えて！',
+    },
+    {'label': '🍱 冷凍できる作り置き', 'prompt': '休日にまとめて作れて、平日が楽になる節約作り置きレシピを教えて！'},
+    {
+      'label': '💡 今月の光熱費を削る裏技',
+      'prompt': '今の季節にすぐ実践できる、電気代・ガス代・水道代の効果的な節約術を教えて！',
+    },
+    {
+      'label': '🧹 100均グッズで時短掃除',
+      'prompt': 'キッチンやお風呂の汚れを、家にあるものや100均アイテムで簡単に落とす掃除術を教えて！',
+    },
+  ];
 
   GenerativeModel? _model;
   ChatSession? _chatSession;
 
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  final List<Map<String, dynamic>> _messages = [];
+  final List _messages = [];
+  final Set _savedMessageIndexes = {};
   bool _isLoading = false;
   File? _selectedImage;
 
@@ -49,50 +71,70 @@ class _AiChatScreenState extends State<AiChatScreen> {
     _checkInitialSetup();
   }
 
-  Future<void> _checkInitialSetup() async {
-    if (_currentUserId.isEmpty) return;
+  String _getSeason(int month) {
+    if (const [3, 4, 5].contains(month)) return '春';
+    if (const [6, 7, 8].contains(month)) return '夏';
+    if (const [9, 10, 11].contains(month)) return '秋';
+    return '冬';
+  }
+
+  Future _checkInitialSetup() async {
+    if (_currentUserId.isEmpty) {
+      setState(() => _isCheckingSetup = false);
+      return;
+    }
 
     try {
       final doc = await FirebaseFirestore.instance
           .collection('users')
           .doc(_currentUserId)
           .get();
-      if (doc.exists && doc.data()!['aiSetupComplete'] == true) {
-        _userArea = doc.data()!['area'] ?? '';
-        _missingAppliances.addAll(
-          List<String>.from(doc.data()!['missingAppliances'] ?? []),
-        );
-        _initAiModel();
-        setState(() {
-          _isSetupComplete = true;
-          _isCheckingSetup = false;
-        });
-      } else {
-        setState(() {
-          _isCheckingSetup = false;
-        });
+      if (doc.exists) {
+        final data = doc.data()!;
+        if (data['userName'] != null &&
+            data['userName'].toString().trim().isNotEmpty) {
+          _userName = data['userName'].toString().trim();
+        }
+        if (data['aiSetupComplete'] == true) {
+          _userArea = data['area']?.toString() ?? '';
+          _areaController.text = _userArea;
+          _missingAppliances.clear();
+          _missingAppliances.addAll(List.from(data['missingAppliances'] ?? []));
+          _initAiModel();
+          setState(() {
+            _isSetupComplete = true;
+            _isCheckingSetup = false;
+          });
+          return;
+        }
       }
+      setState(() {
+        _isCheckingSetup = false;
+      });
     } catch (e) {
-      debugPrint('セットアップ確認エラー: $e');
       setState(() => _isCheckingSetup = false);
     }
   }
 
-  Future<void> _saveSetupAndStart() async {
-    if (_currentUserId.isEmpty || _areaController.text.isEmpty) return;
+  Future _saveSetupAndStart() async {
+    if (_currentUserId.isEmpty || _areaController.text.trim().isEmpty) return;
 
     setState(() => _isCheckingSetup = true);
     _userArea = _areaController.text.trim();
 
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(_currentUserId)
-        .set({
-          'aiSetupComplete': true,
-          'area': _userArea,
-          'missingAppliances': _missingAppliances,
-        }, SetOptions(merge: true));
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_currentUserId)
+          .set({
+            'aiSetupComplete': true,
+            'area': _userArea,
+            'missingAppliances': _missingAppliances,
+          }, SetOptions(merge: true));
+    } catch (e) {}
 
+    _messages.clear();
+    _savedMessageIndexes.clear();
     _initAiModel();
 
     setState(() {
@@ -102,68 +144,151 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   void _initAiModel() {
+    final now = DateTime.now();
+    final season = _getSeason(now.month);
     final missingApplianceText = _missingAppliances.isEmpty
-        ? '特にありません。'
+        ? '特にありません'
         : _missingAppliances.join('、');
 
     _model = GenerativeModel(
       model: 'gemini-3.5-flash',
-      apiKey: _apiKey,
+      apiKey: AiChatScreen.apiKey.trim(),
       systemInstruction: Content.system(
-        'あなたは一人暮らし向けの節約・料理アドバイザーです。'
-        'ユーザーは「$_userArea」に住んでおり、以下の調理家電を持っていません：【$missingApplianceText】。'
-        '必ず持っていない家電を「一切使わずに」作れる料理を提案してください。'
-        '回答はレシピ帳に保存されるため、必ず以下の構成で出力してください。\n\n'
+        'あなたは一人暮らしをサポートするプロの節約・自炊・生活アドバイザーです。\n'
+        'ユーザー名：$_userName\n'
+        '現在の日付：${now.year}年${now.month}月${now.day}日（季節：$season）\n'
+        '居住地域：$_userArea\n'
+        '持っていない調理家電：【$missingApplianceText】\n\n'
+        '【厳守ルール】\n'
+        '1. 持っていない調理家電を「一切使わない」方法だけを提案してください。\n'
+        '2. 居住地域（$_userArea）や現在の季節（$season）に合った旬の食材や気候対策を取り入れてください。\n'
+        '3. 質問内容に応じて必ず以下の見出しフォーマットで回答してください。\n'
+        '①料理・レシピの相談の場合：\n'
         '【料理名】\n'
+        '【目安時間・費用】\n'
         '【材料】\n'
-        '【作り方】\n\n'
-        'スマホで読みやすいよう、全体を250文字程度で簡潔にまとめてください。Markdown記号は使用しないでください。',
+        '【作り方】\n'
+        '【節約・代用ポイント】\n\n'
+        '②掃除・収納・光熱費・その他の生活相談の場合：\n'
+        '【タイトル】\n'
+        '【用意するもの】\n'
+        '【実践ステップ】\n'
+        '【節約効果・コツ】\n\n'
+        'スマホ画面でパッと読めるよう、全体を250〜300文字程度で簡潔にまとめ、Markdown記号（*や#など）は一切使わないでください。',
       ),
     );
     _chatSession = _model!.startChat();
     _messages.add({
       'isUser': false,
       'text':
-          '設定完了！\n持っていない家電（$missingApplianceText）を使わないレシピや、$_userArea の気候に合わせた節約術を提案するよ。何を作る？',
+          '$_userNameさん、こんにちは！\n持っていない家電（$missingApplianceText）を使わない自炊レシピや、$_userAreaの${_getSeason(now.month)}に合わせた節約術を提案するよ。\n下のボタンを選ぶか、冷蔵庫の写真を送ってみてね！',
       'image': null,
     });
   }
 
-  Future<void> _pickImage() async {
+  void _resetChat() {
+    setState(() {
+      _messages.clear();
+      _savedMessageIndexes.clear();
+      _selectedImage = null;
+      _initAiModel();
+    });
+  }
+
+  Future _showImageSourceSheet() async {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(8.0),
+                child: Text(
+                  '食材や場所の写真を追加',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.blue,
+                  child: Icon(Icons.camera_alt, color: Colors.white),
+                ),
+                title: const Text('カメラで撮影する'),
+                subtitle: const Text('冷蔵庫の中身や食材をその場で撮影'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickImage(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.teal,
+                  child: Icon(Icons.photo_library, color: Colors.white),
+                ),
+                title: const Text('アルバムから選択する'),
+                subtitle: const Text('保存済みの写真から選ぶ'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickImage(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future _pickImage(ImageSource source) async {
     try {
       final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+      final pickedFile = await picker.pickImage(
+        source: source,
+        maxWidth: 1024,
+        imageQuality: 80,
+      );
       if (pickedFile != null) {
         setState(() => _selectedImage = File(pickedFile.path));
       }
-    } catch (e) {
-      debugPrint('画像選択エラー: $e');
-    }
+    } catch (e) {}
   }
 
-  Future<void> _sendMessage() async {
-    if (_chatSession == null) return;
+  Future _sendMessage({String? presetText}) async {
+    if (_chatSession == null || _isLoading) return;
 
-    final text = _textController.text.trim();
+    final text = presetText ?? _textController.text.trim();
     if (text.isEmpty && _selectedImage == null) return;
 
     FocusScope.of(context).unfocus();
     final imageToSend = _selectedImage;
 
     setState(() {
-      _messages.add({'isUser': true, 'text': text, 'image': imageToSend});
+      _messages.add({
+        'isUser': true,
+        'text': text.isEmpty ? '（写真を送信しました）' : text,
+        'image': imageToSend,
+      });
       _isLoading = true;
       _selectedImage = null;
     });
-    _textController.clear();
+    if (presetText == null) {
+      _textController.clear();
+    }
     _scrollToBottom();
 
     try {
       final parts = <Part>[];
-      if (text.isNotEmpty)
+      if (text.isNotEmpty) {
         parts.add(TextPart(text));
-      else if (imageToSend != null)
-        parts.add(TextPart('この画像についてアドバイスをお願いします。'));
+      } else if (imageToSend != null) {
+        parts.add(TextPart('この写真に写っている食材や状況を見て、最適なレシピまたは解決アドバイスを提案してください。'));
+      }
 
       if (imageToSend != null) {
         final bytes = await imageToSend.readAsBytes();
@@ -175,7 +300,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       setState(() {
         _messages.add({
           'isUser': false,
-          'text': response.text ?? 'ごめんね、うまく答えられなかったみたい。',
+          'text': response.text ?? 'ごめんね、うまく答えられなかったみたい。もう一度試してみてね。',
           'image': null,
         });
       });
@@ -183,7 +308,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       setState(() {
         _messages.add({
           'isUser': false,
-          'text': 'エラーが起きました。通信状況を確認してね。',
+          'text': 'AI通信エラーが発生しました。\n詳細: $e',
           'image': null,
         });
       });
@@ -193,30 +318,36 @@ class _AiChatScreenState extends State<AiChatScreen> {
     }
   }
 
-  Future<void> _saveAiSuggestion(String suggestionText) async {
-    if (_currentUserId.isEmpty) return;
+  Future _saveAiSuggestion(String suggestionText, int index) async {
+    if (_currentUserId.isEmpty || _savedMessageIndexes.contains(index)) return;
+
+    final bool isRecipe = suggestionText.contains('【料理名】');
+    final String subCat = isRecipe ? 'レシピ' : '節約術';
+    final String postTitle = isRecipe ? 'AI提案レシピ' : 'AI生活アドバイス';
 
     try {
       await FirebaseFirestore.instance.collection('posts').add({
         'content': suggestionText,
-        'userName': 'AI提案レシピ',
+        'userName': postTitle,
         'hasImage': false,
         'mainCategory': 'AI',
-        'subCategory': 'レシピ',
+        'subCategory': subCat,
         'savedUsers': [_currentUserId],
         'createdAt': FieldValue.serverTimestamp(),
       });
 
+      setState(() {
+        _savedMessageIndexes.add(index);
+      });
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('AIタグに保存しました！'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text('保存フォルダの「AI（$subCat）」に保存しました！'),
+          duration: const Duration(seconds: 2),
         ),
       );
-    } catch (e) {
-      debugPrint('保存エラー: $e');
-    }
+    } catch (e) {}
   }
 
   void _scrollToBottom() {
@@ -249,41 +380,88 @@ class _AiChatScreenState extends State<AiChatScreen> {
       return _buildSetupScreen();
     }
 
+    final missingSummary = _missingAppliances.isEmpty
+        ? '制限家電なし'
+        : '不使用: ${_missingAppliances.join('・')}';
+
     return Scaffold(
+      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
-        title: const Text(
-          'AI節約アドバイザー',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'AI節約・自炊アドバイザー',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+            ),
+            Text(
+              '📍$_userArea ｜ $missingSummary',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
         ),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
+        backgroundColor: Colors.white,
+        elevation: 0.5,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.blue),
+            tooltip: '会話をリセット',
+            onPressed: _resetChat,
+          ),
+          IconButton(
+            icon: const Icon(Icons.tune, color: Colors.black87),
+            tooltip: '地域・家電の設定変更',
+            onPressed: () {
+              setState(() {
+                _areaController.text = _userArea;
+                _isSetupComplete = false;
+              });
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
+          _buildQuickPromptBar(),
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
               padding: const EdgeInsets.only(
                 left: 16.0,
                 right: 16.0,
-                top: 16.0,
-                bottom: 120.0,
+                top: 12.0,
+                bottom: 24.0,
               ),
               itemCount: _messages.length,
               itemBuilder: (context, index) {
-                final message = _messages[index];
+                final message = _messages[index] as Map;
                 return _buildMessageBubble(
-                  text: message['text'],
-                  isUser: message['isUser'],
-                  imageFile: message['image'],
+                  index: index,
+                  text: message['text']?.toString() ?? '',
+                  isUser: message['isUser'] == true,
+                  imageFile: message['image'] as File?,
                 );
               },
             ),
           ),
           if (_isLoading)
-            const Padding(
-              padding: EdgeInsets.all(8.0),
-              child: CircularProgressIndicator(),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'AIが最適なプランを考えています...',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
             ),
           _buildMessageInput(),
         ],
@@ -291,14 +469,80 @@ class _AiChatScreenState extends State<AiChatScreen> {
     );
   }
 
+  Widget _buildQuickPromptBar() {
+    return Container(
+      width: double.infinity,
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12.0),
+        child: Row(
+          children: _quickPrompts.map((item) {
+            final mapItem = item as Map;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8.0),
+              child: ActionChip(
+                backgroundColor: Colors.blue.shade50,
+                side: BorderSide(color: Colors.blue.shade200),
+                label: Text(
+                  mapItem['label'].toString(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue.shade800,
+                  ),
+                ),
+                onPressed: _isLoading
+                    ? null
+                    : () => _sendMessage(
+                        presetText: mapItem['prompt'].toString(),
+                      ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSetupScreen() {
     return Scaffold(
-      appBar: AppBar(title: const Text('AIアシスタント初期設定'), elevation: 0),
+      appBar: AppBar(
+        title: const Text('AIアシスタント初期設定'),
+        elevation: 0,
+        leading: _userArea.isNotEmpty
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _isSetupComplete = true),
+              )
+            : null,
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.auto_awesome, color: Colors.blue),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'お住まいの地域と持っていない家電を登録すると、あなたの部屋で作れるレシピや節約術だけをAIが提案します。',
+                      style: TextStyle(fontSize: 13, height: 1.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
             const Text(
               'お住まいの地域',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
@@ -306,8 +550,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
             const SizedBox(height: 8),
             TextField(
               controller: _areaController,
+              onChanged: (_) => setState(() {}),
               decoration: InputDecoration(
-                hintText: '例: 東京都、北海道 など',
+                hintText: '例: 長野県、山梨県、東京都 など',
+                prefixIcon: const Icon(Icons.location_on_outlined),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -320,7 +566,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              '※選択された家電を使わないレシピを提案します',
+              '※選択した家電を一切使わない調理法や代替案を提案します',
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
             const SizedBox(height: 16),
@@ -328,18 +574,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
               spacing: 8.0,
               runSpacing: 8.0,
               children: _cookingAppliances.map((appliance) {
-                final isSelected = _missingAppliances.contains(appliance);
+                final appName = appliance.toString();
+                final isSelected = _missingAppliances.contains(appName);
                 return FilterChip(
-                  label: Text(appliance),
+                  label: Text(appName),
                   selected: isSelected,
                   selectedColor: Colors.blue.shade100,
                   checkmarkColor: Colors.blue,
                   onSelected: (bool selected) {
                     setState(() {
                       if (selected) {
-                        _missingAppliances.add(appliance);
+                        _missingAppliances.add(appName);
                       } else {
-                        _missingAppliances.remove(appliance);
+                        _missingAppliances.remove(appName);
                       }
                     });
                   },
@@ -351,7 +598,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
               width: double.infinity,
               height: 50,
               child: ElevatedButton(
-                onPressed: _areaController.text.isNotEmpty
+                onPressed: _areaController.text.trim().isNotEmpty
                     ? _saveSetupAndStart
                     : null,
                 style: ElevatedButton.styleFrom(
@@ -374,86 +621,138 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Widget _buildMessageBubble({
+    required int index,
     required String text,
     required bool isUser,
     File? imageFile,
   }) {
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 6.0),
-        padding: const EdgeInsets.all(12.0),
-        decoration: BoxDecoration(
-          color: isUser ? Colors.blue.shade100 : Colors.grey.shade200,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(20),
-            topRight: const Radius.circular(20),
-            bottomLeft: isUser
-                ? const Radius.circular(20)
-                : const Radius.circular(0),
-            bottomRight: isUser
-                ? const Radius.circular(0)
-                : const Radius.circular(20),
-          ),
-        ),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.8,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (imageFile != null)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.file(imageFile, fit: BoxFit.cover),
-              ),
-            if (imageFile != null && text.isNotEmpty) const SizedBox(height: 8),
-            if (text.isNotEmpty)
-              Text(
-                text,
-                style: const TextStyle(fontSize: 15, color: Colors.black87),
-              ),
+    final bool isSaved = _savedMessageIndexes.contains(index);
+    final bool isInitialGreeting = index == 0 && !isUser;
 
-            if (!isUser && text.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: InkWell(
-                  onTap: () => _saveAiSuggestion(text),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.bookmark_add_outlined,
-                          size: 16,
-                          color: Colors.blue,
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!isUser) ...[
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Colors.blue.shade100,
+              child: const Icon(
+                Icons.auto_awesome,
+                color: Colors.blue,
+                size: 18,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.all(14.0),
+              decoration: BoxDecoration(
+                color: isUser ? Colors.blue : Colors.white,
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(18),
+                  topRight: const Radius.circular(18),
+                  bottomLeft: isUser
+                      ? const Radius.circular(18)
+                      : const Radius.circular(4),
+                  bottomRight: isUser
+                      ? const Radius.circular(4)
+                      : const Radius.circular(18),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (imageFile != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.file(
+                          imageFile,
+                          height: 200,
+                          fit: BoxFit.cover,
                         ),
-                        SizedBox(width: 4),
-                        Text(
-                          '保存',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.blue,
-                            fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  if (text.isNotEmpty)
+                    Text(
+                      text,
+                      style: TextStyle(
+                        fontSize: 15,
+                        height: 1.5,
+                        color: isUser ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                  if (!isUser && !isInitialGreeting && text.isNotEmpty) ...[
+                    const Divider(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        InkWell(
+                          onTap: isSaved
+                              ? null
+                              : () => _saveAiSuggestion(text, index),
+                          borderRadius: BorderRadius.circular(12),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isSaved
+                                  ? Colors.green.shade50
+                                  : Colors.blue.shade50,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: isSaved
+                                    ? Colors.green.shade200
+                                    : Colors.blue.shade200,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isSaved
+                                      ? Icons.check_circle
+                                      : Icons.bookmark_add_outlined,
+                                  size: 16,
+                                  color: isSaved ? Colors.green : Colors.blue,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  isSaved ? '保存済み' : '保存フォルダに追加',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: isSaved ? Colors.green : Colors.blue,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ),
-                ),
+                  ],
+                ],
               ),
-            ],
-          ],
-        ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -464,11 +763,11 @@ class _AiChatScreenState extends State<AiChatScreen> {
         left: 12.0,
         right: 12.0,
         top: 8.0,
-        bottom: 100.0,
+        bottom: 95.0,
       ),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+        border: Border(top: BorderSide(color: Colors.grey.shade200)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -477,11 +776,12 @@ class _AiChatScreenState extends State<AiChatScreen> {
             Stack(
               children: [
                 Container(
-                  margin: const EdgeInsets.only(bottom: 8),
+                  margin: const EdgeInsets.only(bottom: 8, left: 8),
                   height: 80,
                   width: 80,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.blue.shade200, width: 2),
                     image: DecorationImage(
                       image: FileImage(_selectedImage!),
                       fit: BoxFit.cover,
@@ -492,7 +792,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   top: -8,
                   right: -8,
                   child: IconButton(
-                    icon: const Icon(Icons.cancel, color: Colors.black54),
+                    icon: const Icon(Icons.cancel, color: Colors.black87),
                     onPressed: () => setState(() => _selectedImage = null),
                   ),
                 ),
@@ -501,23 +801,29 @@ class _AiChatScreenState extends State<AiChatScreen> {
           Row(
             children: [
               IconButton(
-                icon: const Icon(Icons.image_outlined, color: Colors.blue),
-                onPressed: _pickImage,
+                icon: const Icon(
+                  Icons.add_a_photo_outlined,
+                  color: Colors.blue,
+                ),
+                tooltip: 'カメラまたは写真を追加',
+                onPressed: _showImageSourceSheet,
               ),
               Expanded(
                 child: TextField(
                   controller: _textController,
-                  maxLines: null,
+                  maxLines: 3,
+                  minLines: 1,
                   decoration: InputDecoration(
-                    hintText: 'AIに相談する...',
+                    hintText: '食材や悩みを入力（例: もやしと卵で1品）',
+                    hintStyle: const TextStyle(fontSize: 14),
                     filled: true,
                     fillColor: Colors.grey.shade100,
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 16,
-                      vertical: 12,
+                      vertical: 10,
                     ),
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(24),
                       borderSide: BorderSide.none,
                     ),
                   ),
@@ -526,10 +832,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
               const SizedBox(width: 8),
               CircleAvatar(
                 backgroundColor: Colors.blue,
-                radius: 20,
+                radius: 22,
                 child: IconButton(
                   icon: const Icon(Icons.send, color: Colors.white, size: 20),
-                  onPressed: _sendMessage,
+                  onPressed: _isLoading ? null : () => _sendMessage(),
                 ),
               ),
             ],
