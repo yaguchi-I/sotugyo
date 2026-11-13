@@ -11,6 +11,13 @@ class AiChatScreen extends StatefulWidget {
 
   static const String apiKey = '';
 
+  static const List fallbackModels = [
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash',
+  ];
+
   @override
   State createState() => _AiChatScreenState();
 }
@@ -34,6 +41,7 @@ class _AiChatScreenState extends State {
   final List _missingAppliances = [];
   String _userArea = '';
   String _userName = 'あなた';
+  String _activeModelName = AiChatScreen.fallbackModels.first.toString();
 
   final List _quickPrompts = [
     {
@@ -78,9 +86,41 @@ class _AiChatScreenState extends State {
     return '冬';
   }
 
+  String _buildSystemPrompt() {
+    final now = DateTime.now();
+    final season = _getSeason(now.month);
+    final missingApplianceText = _missingAppliances.isEmpty
+        ? '特にありません'
+        : _missingAppliances.join('、');
+
+    return 'あなたは一人暮らしをサポートするプロの節約・自炊・生活アドバイザーです。\n'
+        'ユーザー名：$_userName\n'
+        '現在の日付：${now.year}年${now.month}月${now.day}日（季節：$season）\n'
+        '居住地域：$_userArea\n'
+        '持っていない調理家電：【$missingApplianceText】\n\n'
+        '【厳守ルール】\n'
+        '1. 持っていない調理家電を「一切使わない」方法だけを提案してください。\n'
+        '2. 居住地域（$_userArea）や現在の季節（$season）に合った旬の食材や気候対策を取り入れてください。\n'
+        '3. 質問内容に応じて必ず以下の見出しフォーマットで回答してください。\n'
+        '①料理・レシピの相談の場合：\n'
+        '【料理名】\n'
+        '【目安時間・費用】\n'
+        '【材料】\n'
+        '【作り方】\n'
+        '【節約・代用ポイント】\n\n'
+        '②掃除・収納・光熱費・その他の生活相談の場合：\n'
+        '【タイトル】\n'
+        '【用意するもの】\n'
+        '【実践ステップ】\n'
+        '【節約効果・コツ】\n\n'
+        'スマホ画面でパッと読めるよう、全体を250〜300文字程度で簡潔にまとめ、Markdown記号（*や#など）は一切使わないでください。';
+  }
+
   Future _checkInitialSetup() async {
     if (_currentUserId.isEmpty) {
-      setState(() => _isCheckingSetup = false);
+      if (mounted) {
+        setState(() => _isCheckingSetup = false);
+      }
       return;
     }
 
@@ -89,6 +129,7 @@ class _AiChatScreenState extends State {
           .collection('users')
           .doc(_currentUserId)
           .get();
+      if (!mounted) return;
       if (doc.exists) {
         final data = doc.data()!;
         if (data['userName'] != null &&
@@ -112,7 +153,9 @@ class _AiChatScreenState extends State {
         _isCheckingSetup = false;
       });
     } catch (e) {
-      setState(() => _isCheckingSetup = false);
+      if (mounted) {
+        setState(() => _isCheckingSetup = false);
+      }
     }
   }
 
@@ -133,6 +176,8 @@ class _AiChatScreenState extends State {
           }, SetOptions(merge: true));
     } catch (e) {}
 
+    if (!mounted) return;
+
     _messages.clear();
     _savedMessageIndexes.clear();
     _initAiModel();
@@ -143,41 +188,24 @@ class _AiChatScreenState extends State {
     });
   }
 
+  void _createSessionWithModel(String modelName) {
+    _activeModelName = modelName;
+    _model = GenerativeModel(
+      model: modelName,
+      apiKey: AiChatScreen.apiKey.trim(),
+      systemInstruction: Content.system(_buildSystemPrompt()),
+    );
+    _chatSession = _model!.startChat();
+  }
+
   void _initAiModel() {
     final now = DateTime.now();
-    final season = _getSeason(now.month);
     final missingApplianceText = _missingAppliances.isEmpty
         ? '特にありません'
         : _missingAppliances.join('、');
 
-    _model = GenerativeModel(
-      model: 'gemini-3.5-flash',
-      apiKey: AiChatScreen.apiKey.trim(),
-      systemInstruction: Content.system(
-        'あなたは一人暮らしをサポートするプロの節約・自炊・生活アドバイザーです。\n'
-        'ユーザー名：$_userName\n'
-        '現在の日付：${now.year}年${now.month}月${now.day}日（季節：$season）\n'
-        '居住地域：$_userArea\n'
-        '持っていない調理家電：【$missingApplianceText】\n\n'
-        '【厳守ルール】\n'
-        '1. 持っていない調理家電を「一切使わない」方法だけを提案してください。\n'
-        '2. 居住地域（$_userArea）や現在の季節（$season）に合った旬の食材や気候対策を取り入れてください。\n'
-        '3. 質問内容に応じて必ず以下の見出しフォーマットで回答してください。\n'
-        '①料理・レシピの相談の場合：\n'
-        '【料理名】\n'
-        '【目安時間・費用】\n'
-        '【材料】\n'
-        '【作り方】\n'
-        '【節約・代用ポイント】\n\n'
-        '②掃除・収納・光熱費・その他の生活相談の場合：\n'
-        '【タイトル】\n'
-        '【用意するもの】\n'
-        '【実践ステップ】\n'
-        '【節約効果・コツ】\n\n'
-        'スマホ画面でパッと読めるよう、全体を250〜300文字程度で簡潔にまとめ、Markdown記号（*や#など）は一切使わないでください。',
-      ),
-    );
-    _chatSession = _model!.startChat();
+    _createSessionWithModel(AiChatScreen.fallbackModels.first.toString());
+
     _messages.add({
       'isUser': false,
       'text':
@@ -187,6 +215,7 @@ class _AiChatScreenState extends State {
   }
 
   void _resetChat() {
+    if (!mounted) return;
     setState(() {
       _messages.clear();
       _savedMessageIndexes.clear();
@@ -201,7 +230,7 @@ class _AiChatScreenState extends State {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => SafeArea(
+      builder: (sheetContext) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 12.0),
           child: Column(
@@ -222,7 +251,7 @@ class _AiChatScreenState extends State {
                 title: const Text('カメラで撮影する'),
                 subtitle: const Text('冷蔵庫の中身や食材をその場で撮影'),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetContext);
                   _pickImage(ImageSource.camera);
                 },
               ),
@@ -234,7 +263,7 @@ class _AiChatScreenState extends State {
                 title: const Text('アルバムから選択する'),
                 subtitle: const Text('保存済みの写真から選ぶ'),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetContext);
                   _pickImage(ImageSource.gallery);
                 },
               ),
@@ -253,6 +282,7 @@ class _AiChatScreenState extends State {
         maxWidth: 1024,
         imageQuality: 80,
       );
+      if (!mounted) return;
       if (pickedFile != null) {
         setState(() => _selectedImage = File(pickedFile.path));
       }
@@ -283,44 +313,78 @@ class _AiChatScreenState extends State {
     _scrollToBottom();
 
     try {
-      final parts = <Part>[];
-      if (text.isNotEmpty) {
-        parts.add(TextPart(text));
-      } else if (imageToSend != null) {
-        parts.add(TextPart('この写真に写っている食材や状況を見て、最適なレシピまたは解決アドバイスを提案してください。'));
-      }
+      final List parts = [
+        if (text.isNotEmpty)
+          TextPart(text)
+        else if (imageToSend != null)
+          TextPart('この写真に写っている食材や状況を見て、最適なレシピまたは解決アドバイスを提案してください。'),
+      ];
 
       if (imageToSend != null) {
         final bytes = await imageToSend.readAsBytes();
         parts.add(DataPart('image/jpeg', bytes));
       }
 
-      final response = await _chatSession!.sendMessage(Content.multi(parts));
+      final contentToSend = Content.multi(List.from(parts));
+      GenerateContentResponse? response;
+      Object? lastError;
 
+      final List modelsToTry = [
+        _activeModelName,
+        ...AiChatScreen.fallbackModels.where((m) => m != _activeModelName),
+      ];
+
+      for (final modelItem in modelsToTry) {
+        final modelName = modelItem.toString();
+        try {
+          if (modelName != _activeModelName || _chatSession == null) {
+            _createSessionWithModel(modelName);
+          }
+          response = await _chatSession!
+              .sendMessage(contentToSend)
+              .timeout(const Duration(seconds: 25));
+          if (response.text != null && response.text!.trim().isNotEmpty) {
+            break;
+          }
+        } catch (err) {
+          lastError = err;
+          await Future.delayed(const Duration(milliseconds: 600));
+        }
+      }
+
+      if (response == null) {
+        throw lastError ?? Exception('AIサーバーが混雑しています');
+      }
+
+      if (!mounted) return;
       setState(() {
         _messages.add({
           'isUser': false,
-          'text': response.text ?? 'ごめんね、うまく答えられなかったみたい。もう一度試してみてね。',
+          'text': response!.text ?? 'ごめんね、うまく答えられなかったみたい。もう一度試してみてね。',
           'image': null,
         });
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _messages.add({
           'isUser': false,
-          'text': 'AI通信エラーが発生しました。\n詳細: $e',
+          'text': '現在GoogleのAIサーバーが混雑しています。数秒待ってからもう一度送信してみてね。\n詳細: $e',
           'image': null,
         });
       });
     } finally {
-      setState(() => _isLoading = false);
-      _scrollToBottom();
+      if (mounted) {
+        setState(() => _isLoading = false);
+        _scrollToBottom();
+      }
     }
   }
 
   Future _saveAiSuggestion(String suggestionText, int index) async {
     if (_currentUserId.isEmpty || _savedMessageIndexes.contains(index)) return;
 
+    final messenger = ScaffoldMessenger.of(context);
     final bool isRecipe = suggestionText.contains('【料理名】');
     final String subCat = isRecipe ? 'レシピ' : '節約術';
     final String postTitle = isRecipe ? 'AI提案レシピ' : 'AI生活アドバイス';
@@ -336,12 +400,12 @@ class _AiChatScreenState extends State {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
+      if (!mounted) return;
       setState(() {
         _savedMessageIndexes.add(index);
       });
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text('保存フォルダの「AI（$subCat）」に保存しました！'),
           duration: const Duration(seconds: 2),
@@ -352,6 +416,7 @@ class _AiChatScreenState extends State {
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
@@ -387,6 +452,10 @@ class _AiChatScreenState extends State {
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.menu),
+          onPressed: () => Scaffold.of(context).openDrawer(),
+        ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
