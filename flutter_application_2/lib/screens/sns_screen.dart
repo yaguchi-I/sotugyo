@@ -20,14 +20,32 @@ class SnsScreen extends StatefulWidget {
 class _SnsScreenState extends State {
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
   final String currentEmailPrefix =
-      FirebaseAuth.instance.currentUser?.email?.split('@')[0] ?? '';
+      (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
 
   final Map _servingsPerPost = {};
+  final Map _postImageCache = {};
+  final Map _userIconCache = {};
 
-  Uint8List? _decodeBase64(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
+  Uint8List? _decodeAndCache(String cacheKey, String? rawBase64, Map cacheMap) {
+    if (rawBase64 == null || rawBase64.trim().isEmpty) return null;
+    final cleaned = rawBase64.contains(',')
+        ? rawBase64.split(',').last.replaceAll(RegExp(r'\s+'), '')
+        : rawBase64.replaceAll(RegExp(r'\s+'), '');
+    if (cleaned.isEmpty) return null;
+
+    final existing = cacheMap[cacheKey];
+    if (existing != null &&
+        existing is Map &&
+        existing['srcLen'] == cleaned.length &&
+        existing['bytes'] is Uint8List) {
+      return existing['bytes'] as Uint8List;
+    }
+
     try {
-      return base64Decode(base64String);
+      final decoded = base64Decode(cleaned);
+      if (decoded.isEmpty) return null;
+      cacheMap[cacheKey] = {'srcLen': cleaned.length, 'bytes': decoded};
+      return decoded;
     } catch (e) {
       return null;
     }
@@ -43,6 +61,27 @@ class _SnsScreenState extends State {
     return mainCat;
   }
 
+  int _calcRecommendScore(
+    dynamic post,
+    List interestedTags,
+    List lessInterestedTopics,
+  ) {
+    final topicKey = _getTopicKey(post);
+    final mainCat = post['mainCategory']?.toString() ?? '';
+
+    if (topicKey.isNotEmpty && lessInterestedTopics.contains(topicKey)) {
+      return 0;
+    }
+    if (topicKey.isNotEmpty && interestedTags.contains(topicKey)) {
+      return 3;
+    }
+    if (mainCat.isNotEmpty &&
+        interestedTags.any((t) => t.toString().startsWith('$mainCat:'))) {
+      return 2;
+    }
+    return 1;
+  }
+
   String _formatScaledNumber(double val) {
     if ((val - val.round()).abs() < 0.05) {
       return val.round().toString();
@@ -55,7 +94,9 @@ class _SnsScreenState extends State {
     int baseServings,
     int targetServings,
   ) {
-    if (baseServings <= 0 || baseServings == targetServings) return rawAmount;
+    if (baseServings <= 0 || baseServings == targetServings) {
+      return rawAmount;
+    }
     final double ratio = targetServings / baseServings;
 
     final fractionRegex = RegExp(r'(\d+)\s*/\s*(\d+)');
@@ -81,15 +122,14 @@ class _SnsScreenState extends State {
     return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
-  Future _askAiSubstitution({
-    required String recipeTitle,
-    required List ingredients,
-    required String steps,
+  Future _askAiIngredientSubstitution({
+    required String dishTitle,
+    required String targetIngredient,
+    required List allIngredients,
     required List missingAppliances,
-    String? targetIngredient,
   }) async {
-    final key = AiChatScreen.apiKey.trim();
-    if (key.isEmpty || key.contains('ここに')) {
+    final currentKey = AiChatScreen.apiKey.trim();
+    if (currentKey.isEmpty || currentKey.contains('ここに')) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('AIチャット画面でAPIキーを設定してください')));
@@ -110,32 +150,33 @@ class _SnsScreenState extends State {
       ),
     );
 
-    final ingSummary = ingredients
-        .map((e) {
-          final m = e as Map;
-          return '${m['name']}: ${m['amount']}';
-        })
+    final ingNames = allIngredients
+        .map((e) => '${(e as Map)['name'] ?? ''} ${(e)['amount'] ?? ''}')
         .join('、');
     final missingText = missingAppliances.isEmpty
-        ? 'なし'
+        ? '特になし'
         : missingAppliances.join('、');
 
-    final String prompt = targetIngredient != null
-        ? '料理「$recipeTitle」（材料: $ingSummary）を作る際、「$targetIngredient」が家にありません。\n'
-              '一人暮らしの家によくある身近な食材や調味料を使った「$targetIngredient」の代用案と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
-        : '料理「$recipeTitle」（材料: $ingSummary / 手順: $steps）について、\n'
-              '持っていない調理家電【$missingText】を一切使わずに作る方法、およびさらに安く簡単に作れる代替アレンジ案を200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
+    final prompt =
+        '料理「$dishTitle」（全体の材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
+        '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdownの記号（*や#）は使わないでください。';
 
-    String aiReply = '代用案を取得できませんでした。もう一度お試しください。';
+    String replyText = '代用案を取得できませんでした。もう一度お試しください。';
 
-    for (final modelItem in AiChatScreen.fallbackModels) {
+    for (final modelName in AiChatScreen.fallbackModels) {
       try {
-        final model = GenerativeModel(model: modelItem.toString(), apiKey: key);
-        final res = await model
+        final model = GenerativeModel(
+          model: modelName.toString(),
+          apiKey: currentKey,
+        );
+        final response = await model
             .generateContent([Content.text(prompt)])
             .timeout(const Duration(seconds: 20));
-        if (res.text != null && res.text!.trim().isNotEmpty) {
-          aiReply = res.text!.trim();
+        if (response.text != null && response.text!.trim().isNotEmpty) {
+          replyText = response.text!
+              .replaceAll('**', '')
+              .replaceAll('##', '')
+              .trim();
           break;
         }
       } catch (e) {}
@@ -146,16 +187,14 @@ class _SnsScreenState extends State {
 
     showDialog(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      builder: (dialogCtx) => AlertDialog(
         title: Row(
           children: [
             const Icon(Icons.auto_awesome, color: Colors.orange),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                targetIngredient != null
-                    ? '「$targetIngredient」のAI代用案'
-                    : '「$recipeTitle」のAI代替提案',
+                '「$targetIngredient」の代用案',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -166,13 +205,13 @@ class _SnsScreenState extends State {
         ),
         content: SingleChildScrollView(
           child: Text(
-            aiReply,
+            replyText,
             style: const TextStyle(fontSize: 15, height: 1.5),
           ),
         ),
         actions: [
           ElevatedButton(
-            onPressed: () => Navigator.pop(dialogContext),
+            onPressed: () => Navigator.pop(dialogCtx),
             child: const Text('閉じる'),
           ),
         ],
@@ -180,15 +219,11 @@ class _SnsScreenState extends State {
     );
   }
 
-  void _openFullScreenImage(
-    BuildContext context,
-    Uint8List imageBytes,
-    String heroTag,
-  ) {
+  void _openFullScreenImage(Uint8List imageBytes) {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
-        barrierColor: Colors.black,
+        barrierColor: Colors.black87,
         barrierDismissible: true,
         pageBuilder: (pageContext, animation, secondaryAnimation) {
           return FadeTransition(
@@ -209,16 +244,13 @@ class _SnsScreenState extends State {
                 onTap: () => Navigator.of(pageContext).pop(),
                 child: Center(
                   child: InteractiveViewer(
+                    panEnabled: true,
                     minScale: 0.5,
                     maxScale: 4.0,
-                    child: Hero(
-                      tag: heroTag,
-                      child: Image.memory(
-                        imageBytes,
-                        fit: BoxFit.contain,
-                        width: double.infinity,
-                        height: double.infinity,
-                      ),
+                    child: Image.memory(
+                      imageBytes,
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
                     ),
                   ),
                 ),
@@ -230,25 +262,84 @@ class _SnsScreenState extends State {
     );
   }
 
+  Widget _buildTimelineImage(Uint8List imageBytes, String docId) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12.0),
+      child: GestureDetector(
+        onTap: () => _openFullScreenImage(imageBytes),
+        child: Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(maxHeight: 300),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.grey.shade200),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Image.memory(
+            imageBytes,
+            key: ValueKey('post_img_$docId'),
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.medium,
+            errorBuilder: (context, error, stackTrace) {
+              return const SizedBox(
+                height: 120,
+                child: Center(
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.grey,
+                    size: 36,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future _toggleReaction(
+    String docId,
+    String listField,
+    String countField,
+    List currentUsers,
+  ) async {
+    if (currentUserId.isEmpty) return;
+    final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
+    final isAdded = currentUsers.contains(currentUserId);
+
+    try {
+      if (isAdded) {
+        await docRef.update({
+          listField: FieldValue.arrayRemove([currentUserId]),
+          countField: FieldValue.increment(-1),
+        });
+      } else {
+        await docRef.update({
+          listField: FieldValue.arrayUnion([currentUserId]),
+          countField: FieldValue.increment(1),
+        });
+      }
+    } catch (e) {}
+  }
+
   Future _deletePost(String docId) async {
     final messenger = ScaffoldMessenger.of(context);
     final confirm = await showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('投稿の削除'),
-        content: const Text('この投稿を完全に削除しますか？'),
+        content: const Text('この投稿を削除してもよろしいですか？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
             child: const Text('キャンセル'),
           ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
+          TextButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('削除する'),
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -256,7 +347,32 @@ class _SnsScreenState extends State {
 
     if (confirm == true) {
       await FirebaseFirestore.instance.collection('posts').doc(docId).delete();
+      _postImageCache.remove(docId);
       messenger.showSnackBar(const SnackBar(content: Text('投稿を削除しました')));
+    }
+  }
+
+  Future _toggleTopicInterest(String topicKey, bool isCurrentlyDemoted) async {
+    if (currentUserId.isEmpty || topicKey.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final userRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUserId);
+
+    if (isCurrentlyDemoted) {
+      await userRef.set({
+        'lessInterestedTopics': FieldValue.arrayRemove([topicKey]),
+      }, SetOptions(merge: true));
+      messenger.showSnackBar(
+        SnackBar(content: Text('「$topicKey」の表示制限を解除しました')),
+      );
+    } else {
+      await userRef.set({
+        'lessInterestedTopics': FieldValue.arrayUnion([topicKey]),
+      }, SetOptions(merge: true));
+      messenger.showSnackBar(
+        SnackBar(content: Text('「$topicKey」の投稿を表示しにくくしました')),
+      );
     }
   }
 
@@ -269,604 +385,368 @@ class _SnsScreenState extends State {
     messenger.showSnackBar(const SnackBar(content: Text('この投稿を非表示にしました')));
   }
 
-  Future _toggleTopicDemotion(String topicKey, bool isCurrentlyDemoted) async {
-    if (currentUserId.isEmpty || topicKey.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final userRef = FirebaseFirestore.instance
-        .collection('users')
-        .doc(currentUserId);
-
-    if (isCurrentlyDemoted) {
-      await userRef.set({
-        'lessInterestedTopics': FieldValue.arrayRemove([topicKey]),
-      }, SetOptions(merge: true));
-      messenger.showSnackBar(
-        SnackBar(content: Text('「$topicKey」の表示頻度を元に戻しました')),
-      );
-    } else {
-      await userRef.set({
-        'lessInterestedTopics': FieldValue.arrayUnion([topicKey]),
-      }, SetOptions(merge: true));
-      messenger.showSnackBar(
-        SnackBar(content: Text('「$topicKey」の話題をタイムラインに出にくくしました')),
-      );
-    }
-  }
-
-  Future _blockUser(String targetUserKey, String displayUserName) async {
-    if (currentUserId.isEmpty || targetUserKey.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final confirm = await showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text('$displayUserName さんをブロック'),
-        content: const Text('このユーザーの投稿を今後タイムラインに表示しないようにしますか？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('キャンセル'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('ブロックする'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(currentUserId)
-          .set({
-            'blockedUsers': FieldValue.arrayUnion([targetUserKey]),
-          }, SetOptions(merge: true));
-
-      messenger.showSnackBar(
-        SnackBar(content: Text('$displayUserName さんをブロックしました')),
-      );
-    }
-  }
-
   Future _reportPost(String docId) async {
     if (currentUserId.isEmpty) return;
     final messenger = ScaffoldMessenger.of(context);
-    final List reasons = [
-      '誹謗中傷・暴言・嫌がらせ',
-      'スパム・荒らし行為',
-      '不適切な写真・コンテンツ',
-      'その他ガイドライン違反',
-    ];
-
-    final selectedReason = await showDialog(
-      context: context,
-      builder: (dialogContext) => SimpleDialog(
-        title: const Text('通報する理由を選択'),
-        children: reasons.map((r) {
-          final reasonText = r.toString();
-          return SimpleDialogOption(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            onPressed: () => Navigator.pop(dialogContext, reasonText),
-            child: Text(reasonText, style: const TextStyle(fontSize: 15)),
-          );
-        }).toList(),
-      ),
+    await FirebaseFirestore.instance.collection('posts').doc(docId).update({
+      'reportedUsers': FieldValue.arrayUnion([currentUserId]),
+    });
+    messenger.showSnackBar(
+      const SnackBar(content: Text('投稿を通報しました。ご協力ありがとうございます。')),
     );
-
-    if (selectedReason != null) {
-      await FirebaseFirestore.instance.collection('reports').add({
-        'postId': docId,
-        'reportedBy': currentUserId,
-        'reason': selectedReason.toString(),
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await FirebaseFirestore.instance.collection('posts').doc(docId).update({
-        'reportedUsers': FieldValue.arrayUnion([currentUserId]),
-        'hiddenUsers': FieldValue.arrayUnion([currentUserId]),
-      });
-
-      messenger.showSnackBar(
-        const SnackBar(content: Text('通報を受け付け、タイムラインから非表示にしました')),
-      );
-    }
   }
 
-  void _showPostOptionsSheet({
+  Future _blockUser(String targetKey, String displayName) async {
+    if (currentUserId.isEmpty || targetKey.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await FirebaseFirestore.instance.collection('users').doc(currentUserId).set(
+      {
+        'blockedUsers': FieldValue.arrayUnion([targetKey]),
+      },
+      SetOptions(merge: true),
+    );
+    messenger.showSnackBar(SnackBar(content: Text('$displayName さんをブロックしました')));
+  }
+
+  void _showPostOptions({
     required String docId,
     required bool isMyPost,
-    required String targetUserKey,
-    required String displayUserName,
     required String topicKey,
     required bool isTopicDemoted,
+    required String targetUserKey,
+    required String displayUserName,
   }) {
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
       builder: (sheetContext) {
         return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          child: Wrap(
             children: [
               if (isMyPost)
                 ListTile(
                   leading: const Icon(Icons.delete_outline, color: Colors.red),
                   title: const Text(
                     'この投稿を削除する',
-                    style: TextStyle(
-                      color: Colors.red,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(color: Colors.red),
                   ),
                   onTap: () {
                     Navigator.pop(sheetContext);
                     _deletePost(docId);
                   },
-                ),
-              if (topicKey.isNotEmpty)
+                )
+              else ...[
+                if (topicKey.isNotEmpty)
+                  ListTile(
+                    leading: Icon(
+                      isTopicDemoted
+                          ? Icons.visibility_outlined
+                          : Icons.thumb_down_outlined,
+                    ),
+                    title: Text(
+                      isTopicDemoted
+                          ? '「$topicKey」の表示制限を解除する'
+                          : 'この話題（$topicKey）の表示を減らす',
+                    ),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      _toggleTopicInterest(topicKey, isTopicDemoted);
+                    },
+                  ),
                 ListTile(
-                  leading: Icon(
-                    isTopicDemoted ? Icons.trending_up : Icons.trending_down,
-                    color: Colors.blueGrey,
-                  ),
-                  title: Text(
-                    isTopicDemoted
-                        ? '「$topicKey」の話題を通常通り表示する'
-                        : '「$topicKey」の話題を表示しにくくする',
-                  ),
+                  leading: const Icon(Icons.visibility_off_outlined),
+                  title: const Text('この投稿を非表示にする'),
                   onTap: () {
                     Navigator.pop(sheetContext);
-                    _toggleTopicDemotion(topicKey, isTopicDemoted);
+                    _hidePost(docId);
                   },
                 ),
-              ListTile(
-                leading: const Icon(Icons.visibility_off_outlined),
-                title: const Text('この投稿を非表示にする'),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  _hidePost(docId);
-                },
-              ),
-              if (!isMyPost) ...[
                 ListTile(
                   leading: const Icon(
                     Icons.flag_outlined,
                     color: Colors.orange,
                   ),
-                  title: const Text('誹謗中傷・不適切な投稿として通報する'),
+                  title: const Text('この投稿を通報する'),
                   onTap: () {
                     Navigator.pop(sheetContext);
                     _reportPost(docId);
                   },
                 ),
-                if (targetUserKey.isNotEmpty)
-                  ListTile(
-                    leading: const Icon(Icons.block, color: Colors.red),
-                    title: Text('$displayUserName さんをブロックする'),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      _blockUser(targetUserKey, displayUserName);
-                    },
+                ListTile(
+                  leading: const Icon(Icons.block, color: Colors.red),
+                  title: Text(
+                    '$displayUserName さんをブロックする',
+                    style: const TextStyle(color: Colors.red),
                   ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _blockUser(targetUserKey, displayUserName);
+                  },
+                ),
               ],
             ],
           ),
         );
       },
-    );
-  }
-
-  Widget _buildRecipeSection(
-    dynamic post,
-    String docId,
-    List missingAppliances,
-  ) {
-    final String recipeTitle =
-        post['recipeTitle']?.toString().isNotEmpty == true
-        ? post['recipeTitle'].toString()
-        : '手作りレシピ';
-    final int baseServings = (post['baseServings'] is int)
-        ? (post['baseServings'] as int)
-        : (int.tryParse(post['baseServings']?.toString() ?? '1') ?? 1);
-    final int currentServings =
-        (_servingsPerPost[docId] as int?) ?? baseServings;
-
-    final int baseCost = (post['recipeCost'] is int)
-        ? (post['recipeCost'] as int)
-        : (int.tryParse(post['recipeCost']?.toString() ?? '0') ?? 0);
-    final int scaledCost = baseServings > 0
-        ? ((baseCost * currentServings) / baseServings).round()
-        : baseCost;
-
-    final String recipeTime = post['recipeTime']?.toString() ?? '';
-    final List ingredients = List.from(post['recipeIngredients'] ?? []);
-    final String steps = post['recipeSteps']?.toString() ?? '';
-
-    return Container(
-      margin: const EdgeInsets.only(top: 10.0),
-      padding: const EdgeInsets.all(14.0),
-      decoration: BoxDecoration(
-        color: Colors.orange.shade50.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.orange.shade200),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.restaurant, color: Colors.deepOrange, size: 20),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  recipeTitle,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
-                  ),
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => _askAiSubstitution(
-                  recipeTitle: recipeTitle,
-                  ingredients: ingredients,
-                  steps: steps,
-                  missingAppliances: missingAppliances,
-                ),
-                icon: const Icon(
-                  Icons.auto_awesome,
-                  size: 14,
-                  color: Colors.deepOrange,
-                ),
-                label: const Text(
-                  'AI代替案',
-                  style: TextStyle(fontSize: 11, color: Colors.deepOrange),
-                ),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.deepOrange),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 12,
-            runSpacing: 6,
-            children: [
-              if (recipeTime.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '⏱ 調理時間: $recipeTime',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              if (baseCost > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '💰 目安費用: 約$scaledCost円（$currentServings人分）',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          if (ingredients.isNotEmpty) ...[
-            const Divider(height: 20),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  '【材料】（$currentServings人分）',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.orange.shade300),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.remove, size: 15),
-                        constraints: const BoxConstraints(),
-                        padding: const EdgeInsets.all(5),
-                        onPressed: currentServings > 1
-                            ? () {
-                                setState(() {
-                                  _servingsPerPost[docId] = currentServings - 1;
-                                });
-                              }
-                            : null,
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6.0),
-                        child: Text(
-                          '$currentServings人分',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.add, size: 15),
-                        constraints: const BoxConstraints(),
-                        padding: const EdgeInsets.all(5),
-                        onPressed: currentServings < 6
-                            ? () {
-                                setState(() {
-                                  _servingsPerPost[docId] = currentServings + 1;
-                                });
-                              }
-                            : null,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            ...ingredients.map((item) {
-              final mapItem = item as Map;
-              final iName = mapItem['name']?.toString() ?? '';
-              final iRawAmount = mapItem['amount']?.toString() ?? '';
-              final iScaledAmount = _scaleAmountString(
-                iRawAmount,
-                baseServings,
-                currentServings,
-              );
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3.0),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.check_circle_outline,
-                      size: 15,
-                      color: Colors.teal,
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        '$iName ： $iScaledAmount',
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                    ),
-                    TextButton.icon(
-                      onPressed: () => _askAiSubstitution(
-                        recipeTitle: recipeTitle,
-                        ingredients: ingredients,
-                        steps: steps,
-                        missingAppliances: missingAppliances,
-                        targetIngredient: iName,
-                      ),
-                      icon: const Icon(Icons.swap_horiz, size: 14),
-                      label: const Text('代用案', style: TextStyle(fontSize: 11)),
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ],
-          if (steps.isNotEmpty) ...[
-            const Divider(height: 20),
-            const Text(
-              '【作り方】',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 4),
-            Text(steps, style: const TextStyle(fontSize: 13, height: 1.5)),
-          ],
-        ],
-      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder(
-      stream: currentUserId.isNotEmpty
-          ? FirebaseFirestore.instance
-                .collection('users')
-                .doc(currentUserId)
-                .snapshots()
-          : null,
-      builder: (context, myUserSnapshot) {
-        List blockedUsers = [];
-        List lessInterestedTopics = [];
-        List missingAppliances = [];
-
-        if (myUserSnapshot.hasData && myUserSnapshot.data != null) {
-          final myDoc = myUserSnapshot.data as DocumentSnapshot;
-          if (myDoc.exists && myDoc.data() != null) {
-            final dynamic myData = myDoc.data();
-            blockedUsers = List.from(myData['blockedUsers'] ?? []);
-            lessInterestedTopics = List.from(
-              myData['lessInterestedTopics'] ?? [],
-            );
-            missingAppliances = List.from(myData['missingAppliances'] ?? []);
-          }
-        }
-
-        return Scaffold(
-          body: CustomScrollView(
-            slivers: [
-              SliverAppBar(
-                title: const Text('タイムライン'),
-                floating: true,
-                snap: true,
-                leading: IconButton(
-                  icon: const Icon(Icons.menu),
-                  onPressed: () {
-                    Scaffold.of(context).openDrawer();
-                  },
-                ),
-              ),
-              StreamBuilder(
-                stream: FirebaseFirestore.instance
-                    .collection('posts')
-                    .orderBy('createdAt', descending: true)
-                    .snapshots(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const SliverFillRemaining(
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-                  if (!snapshot.hasData) {
-                    return const SliverFillRemaining(
-                      child: Center(child: Text('まだ投稿がありません。最初の投稿をしてみましょう！')),
-                    );
-                  }
-
-                  final querySnap = snapshot.data as QuerySnapshot;
-                  if (querySnap.docs.isEmpty) {
-                    return const SliverFillRemaining(
-                      child: Center(child: Text('まだ投稿がありません。最初の投稿をしてみましょう！')),
-                    );
-                  }
-
-                  final filteredDocs = querySnap.docs.where((doc) {
-                    final data = doc.data() as Map;
-                    if (data['mainCategory'] == 'AI') return false;
-
-                    final List hiddenUsers = List.from(
-                      data['hiddenUsers'] ?? [],
-                    );
-                    if (hiddenUsers.contains(currentUserId)) return false;
-
-                    final List reportedUsers = List.from(
-                      data['reportedUsers'] ?? [],
-                    );
-                    if (reportedUsers.length >= 3) return false;
-
-                    final String postUid = data['userId']?.toString() ?? '';
-                    final String postName = data['userName']?.toString() ?? '';
-                    final String userKey = postUid.isNotEmpty
-                        ? postUid
-                        : postName;
-                    if (userKey.isNotEmpty && blockedUsers.contains(userKey)) {
-                      return false;
-                    }
-
-                    return true;
-                  }).toList();
-
-                  if (filteredDocs.isEmpty) {
-                    return const SliverFillRemaining(
-                      child: Center(child: Text('表示できる投稿がありません')),
-                    );
-                  }
-
-                  final List normalDocs = [];
-                  final List demotedDocs = [];
-
-                  for (final doc in filteredDocs) {
-                    final dynamic data = doc.data();
-                    final String topicKey = _getTopicKey(data);
-                    final String mainCat =
-                        data['mainCategory']?.toString() ?? '';
-                    final bool isDemoted =
-                        (topicKey.isNotEmpty &&
-                            lessInterestedTopics.contains(topicKey)) ||
-                        (mainCat.isNotEmpty &&
-                            lessInterestedTopics.contains(mainCat));
-
-                    if (isDemoted) {
-                      demotedDocs.add(doc);
-                    } else {
-                      normalDocs.add(doc);
-                    }
-                  }
-
-                  final List sortedDocs = [...normalDocs, ...demotedDocs];
-
-                  return SliverList(
-                    delegate: SliverChildBuilderDelegate((context, index) {
-                      final dynamic data = sortedDocs[index].data();
-                      final String docId = sortedDocs[index].id;
-                      final String topicKey = _getTopicKey(data);
-                      final bool isTopicDemoted =
-                          topicKey.isNotEmpty &&
-                          lessInterestedTopics.contains(topicKey);
-
-                      return _buildPostCard(
-                        data,
-                        docId,
-                        context,
-                        topicKey,
-                        isTopicDemoted,
-                        missingAppliances,
-                      );
-                    }, childCount: sortedDocs.length),
-                  );
-                },
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 100)),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.menu),
+            onPressed: () {
+              Scaffold.of(context).openDrawer();
+            },
+          ),
+          title: const Text(
+            'タイムライン',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          bottom: const TabBar(
+            labelColor: Colors.blue,
+            unselectedLabelColor: Colors.grey,
+            indicatorColor: Colors.blue,
+            labelStyle: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            tabs: [
+              Tab(text: 'おすすめ'),
+              Tab(text: '最新'),
             ],
           ),
-        );
-      },
+        ),
+        body: StreamBuilder(
+          stream: currentUserId.isNotEmpty
+              ? FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(currentUserId)
+                    .snapshots()
+              : null,
+          builder: (context, userPrefSnap) {
+            List interestedTags = [];
+            List lessInterestedTopics = [];
+            List blockedUsers = [];
+            List missingAppliances = [];
+
+            if (userPrefSnap.hasData && userPrefSnap.data != null) {
+              final uDoc = userPrefSnap.data as DocumentSnapshot;
+              if (uDoc.exists && uDoc.data() != null) {
+                final uData = uDoc.data() as Map;
+                if (uData['interestedTags'] != null) {
+                  interestedTags = List.from(uData['interestedTags']);
+                }
+                if (uData['lessInterestedTopics'] != null) {
+                  lessInterestedTopics = List.from(
+                    uData['lessInterestedTopics'],
+                  );
+                }
+                if (uData['blockedUsers'] != null) {
+                  blockedUsers = List.from(uData['blockedUsers']);
+                }
+                if (uData['missingAppliances'] != null) {
+                  missingAppliances = List.from(uData['missingAppliances']);
+                }
+              }
+            }
+
+            return StreamBuilder(
+              stream: FirebaseFirestore.instance
+                  .collection('posts')
+                  .orderBy('createdAt', descending: true)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.hasData || snapshot.data == null) {
+                  return const Center(child: Text('まだ投稿がありません'));
+                }
+
+                final querySnap = snapshot.data as QuerySnapshot;
+                final allDocs = querySnap.docs;
+
+                final List visibleDocs = [];
+                for (final doc in allDocs) {
+                  final data = doc.data() as Map;
+                  if (data['mainCategory'] == 'AI') continue;
+
+                  final List hiddenUsers = data['hiddenUsers'] != null
+                      ? List.from(data['hiddenUsers'])
+                      : [];
+                  if (hiddenUsers.contains(currentUserId)) continue;
+
+                  final List reportedUsers = data['reportedUsers'] != null
+                      ? List.from(data['reportedUsers'])
+                      : [];
+                  if (reportedUsers.length >= 3 ||
+                      reportedUsers.contains(currentUserId)) {
+                    continue;
+                  }
+
+                  final postUid = data['userId']?.toString() ?? '';
+                  final postUName = data['userName']?.toString() ?? '';
+                  if ((postUid.isNotEmpty && blockedUsers.contains(postUid)) ||
+                      (postUName.isNotEmpty &&
+                          blockedUsers.contains(postUName))) {
+                    continue;
+                  }
+
+                  visibleDocs.add(doc);
+                }
+
+                final List recommendedDocs = List.from(visibleDocs);
+                recommendedDocs.sort((a, b) {
+                  final dataA = (a as QueryDocumentSnapshot).data() as Map;
+                  final dataB = (b as QueryDocumentSnapshot).data() as Map;
+                  final scoreA = _calcRecommendScore(
+                    dataA,
+                    interestedTags,
+                    lessInterestedTopics,
+                  );
+                  final scoreB = _calcRecommendScore(
+                    dataB,
+                    interestedTags,
+                    lessInterestedTopics,
+                  );
+                  return scoreB.compareTo(scoreA);
+                });
+
+                return TabBarView(
+                  children: [
+                    _buildFeedList(
+                      docs: recommendedDocs,
+                      isRecommendedTab: true,
+                      interestedTags: interestedTags,
+                      lessInterestedTopics: lessInterestedTopics,
+                      missingAppliances: missingAppliances,
+                    ),
+                    _buildFeedList(
+                      docs: visibleDocs,
+                      isRecommendedTab: false,
+                      interestedTags: interestedTags,
+                      lessInterestedTopics: lessInterestedTopics,
+                      missingAppliances: missingAppliances,
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        ),
+      ),
     );
   }
 
-  Widget _buildPostCard(
-    dynamic post,
-    String docId,
-    BuildContext context,
-    String topicKey,
-    bool isTopicDemoted,
-    List missingAppliances,
-  ) {
-    final bool hasImage = post['hasImage'] ?? false;
+  Widget _buildFeedList({
+    required List docs,
+    required bool isRecommendedTab,
+    required List interestedTags,
+    required List lessInterestedTopics,
+    required List missingAppliances,
+  }) {
+    if (docs.isEmpty) {
+      return const Center(
+        child: Text('表示できる投稿がありません', style: TextStyle(color: Colors.grey)),
+      );
+    }
+
+    return Column(
+      children: [
+        if (isRecommendedTab && interestedTags.isNotEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            color: Colors.blue.shade50,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.auto_awesome,
+                    size: 16,
+                    color: Colors.blue.shade700,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '優先表示中のタグ: ',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue.shade900,
+                    ),
+                  ),
+                  ...interestedTags.map((t) {
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 6.0),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.blue.shade200),
+                        ),
+                        child: Text(
+                          t.toString(),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.blue.shade800,
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.only(bottom: 110),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              final doc = docs[index] as QueryDocumentSnapshot;
+              final post = doc.data() as Map;
+              final topicKey = _getTopicKey(post);
+              final isTopicDemoted =
+                  topicKey.isNotEmpty &&
+                  lessInterestedTopics.contains(topicKey);
+              final score = _calcRecommendScore(
+                post,
+                interestedTags,
+                lessInterestedTopics,
+              );
+              final isMatchedInterest = isRecommendedTab && score >= 2;
+
+              return _buildPostCard(
+                post: post,
+                docId: doc.id,
+                context: context,
+                topicKey: topicKey,
+                isTopicDemoted: isTopicDemoted,
+                isMatchedInterest: isMatchedInterest,
+                missingAppliances: missingAppliances,
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPostCard({
+    required dynamic post,
+    required String docId,
+    required BuildContext context,
+    required String topicKey,
+    required bool isTopicDemoted,
+    required bool isMatchedInterest,
+    required List missingAppliances,
+  }) {
     final bool isRecipePost = post['isRecipePost'] == true;
     final int replies = post['replies'] ?? 0;
 
@@ -900,10 +780,11 @@ class _SnsScreenState extends State {
         ? postUserId
         : rawUserName;
 
-    final Uint8List? postImageBytes = _decodeBase64(
+    final Uint8List? postImageBytes = _decodeAndCache(
+      docId,
       post['imageBase64']?.toString(),
+      _postImageCache,
     );
-    final String heroTag = 'timeline_img_$docId';
 
     return StreamBuilder(
       stream: targetLookupUid.isNotEmpty
@@ -917,12 +798,12 @@ class _SnsScreenState extends State {
         String displayIconBase64 = post['userIconBase64']?.toString() ?? '';
 
         if (userSnapshot.hasData && userSnapshot.data != null) {
-          final userDoc = userSnapshot.data as DocumentSnapshot;
-          if (userDoc.exists && userDoc.data() != null) {
-            final dynamic uData = userDoc.data();
+          final uDoc = userSnapshot.data as DocumentSnapshot;
+          if (uDoc.exists && uDoc.data() != null) {
+            final uData = uDoc.data() as Map;
             if (uData['userName'] != null &&
                 uData['userName'].toString().trim().isNotEmpty) {
-              displayUserName = uData['userName'].toString().trim();
+              displayUserName = uData['userName'].toString();
             }
             if (uData['iconBase64'] != null &&
                 uData['iconBase64'].toString().isNotEmpty) {
@@ -931,7 +812,27 @@ class _SnsScreenState extends State {
           }
         }
 
-        final Uint8List? userIconBytes = _decodeBase64(displayIconBase64);
+        final Uint8List? userIconBytes = _decodeAndCache(
+          targetUserKey,
+          displayIconBase64,
+          _userIconCache,
+        );
+
+        final int baseServings =
+            int.tryParse(post['recipeServings']?.toString() ?? '1') ?? 1;
+        final int currentServings =
+            (_servingsPerPost[docId] as int?) ?? baseServings;
+        final String rawRecipeCost = post['recipeCost']?.toString() ?? '';
+        final String scaledRecipeCost = _scaleAmountString(
+          rawRecipeCost,
+          baseServings,
+          currentServings,
+        );
+        final String recipeTime = post['recipeTime']?.toString() ?? '';
+        final List recipeIngredients = post['recipeIngredients'] != null
+            ? List.from(post['recipeIngredients'])
+            : [];
+        final String recipeSteps = post['recipeSteps']?.toString() ?? '';
 
         return InkWell(
           onTap: () {
@@ -943,112 +844,101 @@ class _SnsScreenState extends State {
             );
           },
           child: Container(
-            decoration: const BoxDecoration(
+            padding: const EdgeInsets.all(16.0),
+            decoration: BoxDecoration(
+              color: Colors.white,
               border: Border(
-                bottom: BorderSide(color: Colors.grey, width: 0.5),
+                bottom: BorderSide(color: Colors.grey.shade200, width: 1),
               ),
             ),
-            padding: const EdgeInsets.all(16.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (isMatchedInterest)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6.0),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.auto_awesome,
+                          size: 14,
+                          color: Colors.blue.shade700,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '興味のあるタグに一致',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.blue.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     CircleAvatar(
-                      backgroundColor: Colors.grey,
+                      radius: 20,
+                      backgroundColor: Colors.blue.shade100,
                       backgroundImage: userIconBytes != null
                           ? MemoryImage(userIconBytes)
                           : null,
                       child: userIconBytes == null
-                          ? const Icon(Icons.person, color: Colors.white)
+                          ? const Icon(Icons.person, color: Colors.blue)
                           : null,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Wrap(
                         crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8.0,
-                        runSpacing: 4.0,
+                        spacing: 6,
+                        runSpacing: 4,
                         children: [
                           Text(
                             displayUserName,
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 16,
+                              fontSize: 15,
                             ),
                           ),
                           if (post['mainCategory'] != null &&
                               post['mainCategory'] != '指定なし')
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
+                                horizontal: 8,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
                                 color: Colors.blue.shade50,
-                                borderRadius: BorderRadius.circular(4),
+                                borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
                                 post['mainCategory'].toString(),
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: Colors.blue.shade700,
+                                  color: Colors.blue.shade800,
+                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
                           if (post['subCategory'] != null &&
-                              post['subCategory'] != '指定なし')
+                              post['subCategory'] != '指定なし' &&
+                              post['subCategory'].toString().isNotEmpty)
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
+                                horizontal: 8,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(4),
+                                color: Colors.grey.shade100,
+                                borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
                                 post['subCategory'].toString(),
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 11,
-                                  color: Colors.green.shade700,
-                                ),
-                              ),
-                            ),
-                          if (isRecipePost)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade100,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                '🍳 レシピ',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.orange.shade900,
-                                ),
-                              ),
-                            ),
-                          if (isTopicDemoted)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.grey.shade200,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: const Text(
-                                '表示頻度低',
-                                style: TextStyle(
-                                  fontSize: 10,
                                   color: Colors.black54,
                                 ),
                               ),
@@ -1058,58 +948,228 @@ class _SnsScreenState extends State {
                     ),
                     IconButton(
                       icon: const Icon(
-                        Icons.more_horiz,
+                        Icons.more_vert,
+                        size: 18,
                         color: Colors.grey,
-                        size: 20,
                       ),
-                      padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
-                      onPressed: () => _showPostOptionsSheet(
+                      padding: EdgeInsets.zero,
+                      onPressed: () => _showPostOptions(
                         docId: docId,
                         isMyPost: isMyPost,
-                        targetUserKey: targetUserKey,
-                        displayUserName: displayUserName,
                         topicKey: topicKey,
                         isTopicDemoted: isTopicDemoted,
+                        targetUserKey: targetUserKey,
+                        displayUserName: displayUserName,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                if ((post['content']?.toString() ?? '').isNotEmpty)
-                  Text(
-                    post['content'].toString(),
-                    style: const TextStyle(fontSize: 15),
-                  ),
-                if (isRecipePost)
-                  _buildRecipeSection(post, docId, missingAppliances),
-                if (hasImage && postImageBytes != null) ...[
-                  const SizedBox(height: 12),
-                  GestureDetector(
-                    onTap: () =>
-                        _openFullScreenImage(context, postImageBytes, heroTag),
-                    child: Hero(
-                      tag: heroTag,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 300),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.memory(
-                            postImageBytes,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
+                if (post['title'] != null &&
+                    post['title'].toString().trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10.0, bottom: 4.0),
+                    child: Text(
+                      post['title'].toString(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
                       ),
                     ),
                   ),
+                if (post['content'] != null &&
+                    post['content'].toString().trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6.0),
+                    child: Text(
+                      post['content'].toString(),
+                      style: const TextStyle(fontSize: 14, height: 1.4),
+                    ),
+                  ),
+                if (isRecipePost) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 4,
+                          children: [
+                            if (recipeTime.isNotEmpty)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.schedule,
+                                    size: 15,
+                                    color: Colors.black54,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    recipeTime,
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            if (scaledRecipeCost.isNotEmpty)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.payments_outlined,
+                                    size: 15,
+                                    color: Colors.green,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '$scaledRecipeCost（$currentServings人分）',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.green,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
+                        const Divider(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '材料（$currentServings人分）',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                            Row(
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.remove_circle_outline,
+                                    size: 18,
+                                  ),
+                                  constraints: const BoxConstraints(),
+                                  padding: const EdgeInsets.all(4),
+                                  onPressed: currentServings > 1
+                                      ? () {
+                                          setState(() {
+                                            _servingsPerPost[docId] =
+                                                currentServings - 1;
+                                          });
+                                        }
+                                      : null,
+                                ),
+                                Text(
+                                  '$currentServings人分',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.add_circle_outline,
+                                    size: 18,
+                                  ),
+                                  constraints: const BoxConstraints(),
+                                  padding: const EdgeInsets.all(4),
+                                  onPressed: currentServings < 6
+                                      ? () {
+                                          setState(() {
+                                            _servingsPerPost[docId] =
+                                                currentServings + 1;
+                                          });
+                                        }
+                                      : null,
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        ...recipeIngredients.map((rawIng) {
+                          final ingMap = rawIng as Map;
+                          final name = ingMap['name']?.toString() ?? '';
+                          final rawAmt = ingMap['amount']?.toString() ?? '';
+                          final scaledAmt = _scaleAmountString(
+                            rawAmt,
+                            baseServings,
+                            currentServings,
+                          );
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2.0),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    '・$name : $scaledAmt',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => _askAiIngredientSubstitution(
+                                    dishTitle:
+                                        post['title']?.toString() ?? 'レシピ',
+                                    targetIngredient: name,
+                                    allIngredients: recipeIngredients,
+                                    missingAppliances: missingAppliances,
+                                  ),
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 2,
+                                    ),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: const Text(
+                                    'AI代用案',
+                                    style: TextStyle(fontSize: 11),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        }),
+                        if (recipeSteps.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          const Text(
+                            '作り方',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            recipeSteps,
+                            style: const TextStyle(fontSize: 13, height: 1.4),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ],
+                if (postImageBytes != null)
+                  _buildTimelineImage(postImageBytes, docId),
                 const SizedBox(height: 12),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     _buildActionButton(
                       icon: Icons.chat_bubble_outline,
-                      color: Colors.black54,
+                      color: Colors.grey,
                       count: replies,
                       onTap: () {
                         Navigator.push(
@@ -1125,76 +1185,38 @@ class _SnsScreenState extends State {
                     ),
                     _buildActionButton(
                       icon: isLiked ? Icons.favorite : Icons.favorite_border,
-                      color: isLiked ? Colors.pink : Colors.black54,
+                      color: isLiked ? Colors.pink : Colors.grey,
                       count: likesCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isLiked) {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                      onTap: () => _toggleReaction(
+                        docId,
+                        'likedUsers',
+                        'likes',
+                        likedUsers,
+                      ),
                     ),
                     _buildActionButton(
-                      icon: isHelpful ? Icons.thumb_up : Icons.thumb_up_off_alt,
-                      color: isHelpful ? Colors.blue : Colors.black54,
+                      icon: isHelpful
+                          ? Icons.lightbulb
+                          : Icons.lightbulb_outline,
+                      color: isHelpful ? Colors.orange : Colors.grey,
                       count: helpfulsCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isHelpful) {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
-                    ),
-                    IconButton(
-                      icon: Icon(
-                        isSaved ? Icons.bookmark : Icons.bookmark_border,
-                        color: isSaved ? Colors.blue : Colors.black54,
+                      onTap: () => _toggleReaction(
+                        docId,
+                        'helpfulUsers',
+                        'helpfuls',
+                        helpfulUsers,
                       ),
-                      onPressed: () {
-                        if (currentUserId.isEmpty) return;
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isSaved) {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                    ),
+                    _buildActionButton(
+                      icon: isSaved ? Icons.bookmark : Icons.bookmark_border,
+                      color: isSaved ? Colors.blue : Colors.grey,
+                      count: 0,
+                      onTap: () => _toggleReaction(
+                        docId,
+                        'savedUsers',
+                        'saves',
+                        savedUsers,
+                      ),
                     ),
                   ],
                 ),
