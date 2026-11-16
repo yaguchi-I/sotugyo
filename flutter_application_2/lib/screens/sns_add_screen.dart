@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -32,7 +31,8 @@ class _SnsAddScreenState extends State {
 
   bool _isUploading = false;
   bool _isPickingImage = false;
-  File? _image;
+  bool _isRecipeMode = false;
+  Uint8List? _imageBytes;
 
   final List _mainCategories = ['指定なし', '料理', '掃除', '収納', 'その他'];
   final Map _subCategories = {
@@ -58,23 +58,19 @@ class _SnsAddScreenState extends State {
   String _selectedMainCategory = '指定なし';
   String _selectedSubCategory = '指定なし';
 
-  Uint8List? _decodeBase64(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
-    try {
-      return base64Decode(base64String);
-    } catch (e) {
-      return null;
+  @override
+  void dispose() {
+    _contentController.dispose();
+    _recipeTitleController.dispose();
+    _recipeCostController.dispose();
+    _recipeTimeController.dispose();
+    _recipeStepsController.dispose();
+    for (final row in _ingredientRows) {
+      final mapRow = row as Map;
+      (mapRow['name'] as TextEditingController).dispose();
+      (mapRow['amount'] as TextEditingController).dispose();
     }
-  }
-
-  bool _containsNgWord(String text) {
-    final normalized = text.replaceAll(' ', '').replaceAll(' ', '');
-    for (final word in _ngWords) {
-      if (normalized.contains(word.toString())) {
-        return true;
-      }
-    }
-    return false;
+    super.dispose();
   }
 
   void _addIngredientRow() {
@@ -89,45 +85,14 @@ class _SnsAddScreenState extends State {
   void _removeIngredientRow(int index) {
     if (_ingredientRows.length <= 1) return;
     setState(() {
-      final row = _ingredientRows.removeAt(index) as Map;
-      (row['name'] as TextEditingController).dispose();
-      (row['amount'] as TextEditingController).dispose();
+      final mapRow = _ingredientRows.removeAt(index) as Map;
+      (mapRow['name'] as TextEditingController).dispose();
+      (mapRow['amount'] as TextEditingController).dispose();
     });
   }
 
-  Future _moderatePostInBackground(String docId, String contentText) async {
-    if (contentText.trim().isEmpty) return;
-    final key = AiChatScreen.apiKey.trim();
-    if (key.isEmpty || key.contains('ここに')) return;
-
-    try {
-      final model = GenerativeModel(
-        model: 'gemini-3.5-flash-lite',
-        apiKey: key,
-      );
-      final prompt =
-          '以下のSNS投稿文に、他者への深刻な誹謗中傷、脅迫、差別、または悪質な荒らし行為が含まれているか判定してください。\n'
-          '日常の愚痴や少し強い表現程度であれば許容し、明確に有害な場合のみ UNSAFE と出力してください。\n'
-          '回答は SAFE または UNSAFE のいずれか1単語のみで出力してください。\n\n'
-          '投稿文：$contentText';
-
-      final response = await model
-          .generateContent([Content.text(prompt)])
-          .timeout(const Duration(seconds: 15));
-      final result = (response.text ?? '').trim().toUpperCase();
-
-      if (result.contains('UNSAFE')) {
-        await FirebaseFirestore.instance
-            .collection('posts')
-            .doc(docId)
-            .delete();
-      }
-    } catch (e) {}
-  }
-
-  Future _pickImage({ImageSource source = ImageSource.gallery}) async {
+  Future _pickImage(ImageSource source) async {
     if (_isPickingImage) return;
-
     setState(() {
       _isPickingImage = true;
     });
@@ -136,18 +101,23 @@ class _SnsAddScreenState extends State {
       final picker = ImagePicker();
       final pickedFile = await picker.pickImage(
         source: source,
-        maxWidth: 800,
-        maxHeight: 800,
+        maxWidth: 1024,
+        maxHeight: 1024,
         imageQuality: 75,
       );
       if (pickedFile != null) {
-        if (!mounted) return;
-        setState(() {
-          _image = File(pickedFile.path);
-        });
+        final bytes = await pickedFile.readAsBytes();
+        if (mounted) {
+          setState(() {
+            _imageBytes = bytes;
+          });
+        }
       }
     } catch (e) {
-      debugPrint('画像選択エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('画像の読み込みに失敗しました: $e')));
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -157,47 +127,90 @@ class _SnsAddScreenState extends State {
     }
   }
 
-  Future _post() async {
-    final text = _contentController.text.trim();
+  bool _containsLocalNgWord(String text) {
+    final lower = text.toLowerCase();
+    for (final w in _ngWords) {
+      if (lower.contains(w.toString())) return true;
+    }
+    return false;
+  }
+
+  Future _runBackgroundModeration(String docId, String combinedText) async {
+    final currentKey = AiChatScreen.apiKey.trim();
+    if (currentKey.isEmpty || currentKey.contains('ここに')) return;
+
+    final prompt =
+        '以下のSNS投稿テキストに、他者への深刻な誹謗中傷、暴力予告、違法行為の助長が含まれているか判定してください。\n'
+        '問題がある場合は「NG」、問題がない日常の投稿であれば「SAFE」とだけ出力してください。\n'
+        '投稿内容：$combinedText';
+
+    for (final modelItem in AiChatScreen.fallbackModels) {
+      try {
+        final model = GenerativeModel(
+          model: modelItem.toString(),
+          apiKey: currentKey,
+        );
+        final res = await model
+            .generateContent([Content.text(prompt)])
+            .timeout(const Duration(seconds: 15));
+        final result = (res.text ?? '').trim().toUpperCase();
+        if (result.contains('NG')) {
+          await FirebaseFirestore.instance
+              .collection('posts')
+              .doc(docId)
+              .delete();
+        }
+        break;
+      } catch (e) {}
+    }
+  }
+
+  Future _submitPost() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final content = _contentController.text.trim();
     final recipeTitle = _recipeTitleController.text.trim();
-    final isRecipeMode =
-        _selectedMainCategory == '料理' && recipeTitle.isNotEmpty;
 
-    if (text.isEmpty && !isRecipeMode && _image == null) return;
+    if (!_isRecipeMode && content.isEmpty && _imageBytes == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('投稿内容または画像を入力してください')),
+      );
+      return;
+    }
 
-    final combinedText =
-        '$text $recipeTitle${_recipeStepsController.text.trim()}';
-    if (_containsNgWord(combinedText)) {
-      ScaffoldMessenger.of(context).showSnackBar(
+    if (_isRecipeMode && recipeTitle.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('料理名を入力してください')));
+      return;
+    }
+
+    final combinedCheckText =
+        '$recipeTitle $content ${_recipeStepsController.text}';
+    if (_containsLocalNgWord(combinedCheckText)) {
+      messenger.showSnackBar(
         const SnackBar(
-          content: Text('相手を傷つける可能性のある禁止ワードが含まれているため投稿できません'),
+          content: Text('不適切な表現が含まれているため投稿できません'),
           backgroundColor: Colors.redAccent,
         ),
       );
       return;
     }
 
-    final messenger = ScaffoldMessenger.of(context);
-    FocusScope.of(context).unfocus();
-
     setState(() {
       _isUploading = true;
     });
 
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      final uid = user?.uid ?? '';
-      String userName =
-          user?.displayName ?? user?.email?.split('@')[0] ?? '名無しユーザー';
+      final currentUser = FirebaseAuth.instance.currentUser;
+      final uid = currentUser?.uid ?? '';
+      String userName = currentUser?.displayName ?? '';
       String userIconBase64 = '';
 
       if (uid.isNotEmpty) {
-        final userDoc = await FirebaseFirestore.instance
+        final uDoc = await FirebaseFirestore.instance
             .collection('users')
             .doc(uid)
             .get();
-        if (userDoc.exists && userDoc.data() != null) {
-          final uData = userDoc.data()!;
+        if (uDoc.exists && uDoc.data() != null) {
+          final uData = uDoc.data()!;
           if (uData['userName'] != null &&
               uData['userName'].toString().trim().isNotEmpty) {
             userName = uData['userName'].toString().trim();
@@ -208,59 +221,46 @@ class _SnsAddScreenState extends State {
         }
       }
 
-      String imageBase64 = '';
-      if (_image != null) {
-        final bytes = await _image!.readAsBytes();
-        imageBase64 = base64Encode(bytes);
+      if (userName.isEmpty) {
+        userName = (currentUser?.email ?? '名無し').split('@').first;
       }
 
       final List ingredientsData = [];
-      if (isRecipeMode) {
-        for (final item in _ingredientRows) {
-          final row = item as Map;
-          final iName = (row['name'] as TextEditingController).text.trim();
-          final iAmount = (row['amount'] as TextEditingController).text.trim();
-          if (iName.isNotEmpty) {
-            ingredientsData.add({
-              'name': iName,
-              'amount': iAmount.isEmpty ? '適量' : iAmount,
-            });
+      if (_isRecipeMode) {
+        for (final row in _ingredientRows) {
+          final mapRow = row as Map;
+          final n = (mapRow['name'] as TextEditingController).text.trim();
+          final a = (mapRow['amount'] as TextEditingController).text.trim();
+          if (n.isNotEmpty) {
+            ingredientsData.add({'name': n, 'amount': a.isEmpty ? '適量' : a});
           }
         }
       }
 
-      final int parsedCost =
-          int.tryParse(
-            _recipeCostController.text.trim().replaceAll(RegExp(r'[^0-9]'), ''),
-          ) ??
-          0;
-      final String timeText = _recipeTimeController.text.trim();
-      final String stepsText = _recipeStepsController.text.trim();
-
-      String displayContent = text;
-      if (isRecipeMode && displayContent.isEmpty) {
-        displayContent = '「$recipeTitle」のレシピを投稿しました！';
-      }
+      final String imageBase64 = _imageBytes != null
+          ? base64Encode(_imageBytes!)
+          : '';
 
       final docRef = await FirebaseFirestore.instance.collection('posts').add({
         'userId': uid,
         'userName': userName,
         'userIconBase64': userIconBase64,
-        'content': displayContent,
-        'hasImage': _image != null,
-        'imageBase64': imageBase64,
-        'mainCategory': _selectedMainCategory,
+        'mainCategory': _isRecipeMode ? '料理' : _selectedMainCategory,
         'subCategory': _selectedSubCategory,
-        'isRecipePost': isRecipeMode,
-        'recipeTitle': isRecipeMode ? recipeTitle : '',
-        'baseServings': isRecipeMode ? _baseServings : 1,
-        'recipeCost': isRecipeMode ? parsedCost : 0,
-        'recipeTime': isRecipeMode ? timeText : '',
-        'recipeIngredients': isRecipeMode ? ingredientsData : [],
-        'recipeSteps': isRecipeMode ? stepsText : '',
-        'replies': 0,
+        'title': _isRecipeMode ? recipeTitle : '',
+        'content': content,
+        'hasImage': _imageBytes != null,
+        'imageBase64': imageBase64,
+        'isRecipePost': _isRecipeMode,
+        'recipeCost': _isRecipeMode ? _recipeCostController.text.trim() : '',
+        'recipeTime': _isRecipeMode ? _recipeTimeController.text.trim() : '',
+        'recipeServings': _isRecipeMode ? _baseServings : 1,
+        'recipeIngredients': ingredientsData,
+        'recipeSteps': _isRecipeMode ? _recipeStepsController.text.trim() : '',
         'likes': 0,
         'helpfuls': 0,
+        'saves': 0,
+        'replies': 0,
         'likedUsers': [],
         'helpfulUsers': [],
         'savedUsers': [],
@@ -269,542 +269,391 @@ class _SnsAddScreenState extends State {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      _moderatePostInBackground(docRef.id, combinedText);
-
-      _contentController.clear();
-      _recipeTitleController.clear();
-      _recipeCostController.clear();
-      _recipeTimeController.clear();
-      _recipeStepsController.clear();
-      for (final item in _ingredientRows) {
-        final row = item as Map;
-        (row['name'] as TextEditingController).clear();
-        (row['amount'] as TextEditingController).clear();
-      }
+      _runBackgroundModeration(docRef.id, combinedCheckText);
 
       if (!mounted) return;
+
       setState(() {
-        _image = null;
-        _baseServings = 1;
-        _selectedMainCategory = '指定なし';
-        _selectedSubCategory = '指定なし';
+        _contentController.clear();
+        _recipeTitleController.clear();
+        _recipeCostController.clear();
+        _recipeTimeController.clear();
+        _recipeStepsController.clear();
+        for (final row in _ingredientRows) {
+          final mapRow = row as Map;
+          (mapRow['name'] as TextEditingController).clear();
+          (mapRow['amount'] as TextEditingController).clear();
+        }
+        _imageBytes = null;
+        _isUploading = false;
       });
 
-      messenger.showSnackBar(const SnackBar(content: Text('投稿しました！')));
+      messenger.showSnackBar(const SnackBar(content: Text('タイムラインに投稿しました！')));
     } catch (e) {
-      messenger.showSnackBar(const SnackBar(content: Text('エラーが発生しました')));
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isUploading = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _isUploading = false;
+      });
+      messenger.showSnackBar(SnackBar(content: Text('投稿に失敗しました: $e')));
     }
   }
 
   @override
-  void dispose() {
-    _contentController.dispose();
-    _recipeTitleController.dispose();
-    _recipeCostController.dispose();
-    _recipeTimeController.dispose();
-    _recipeStepsController.dispose();
-    for (final item in _ingredientRows) {
-      final row = item as Map;
-      (row['name'] as TextEditingController).dispose();
-      (row['amount'] as TextEditingController).dispose();
-    }
-    super.dispose();
-  }
+  Widget build(BuildContext context) {
+    final List currentSubList = List.from(
+      _subCategories[_selectedMainCategory] ?? ['指定なし'],
+    );
 
-  Widget _buildRecipeInputSection() {
-    return Container(
-      margin: const EdgeInsets.only(top: 16.0),
-      padding: const EdgeInsets.all(16.0),
-      decoration: BoxDecoration(
-        color: Colors.orange.shade50.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.orange.shade200),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.restaurant_menu, color: Colors.orange.shade800),
-              const SizedBox(width: 8),
-              Text(
-                'レシピ詳細を入力（任意）',
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  color: Colors.orange.shade900,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _recipeTitleController,
-            decoration: InputDecoration(
-              labelText: '料理名（例: もやしと豚肉のレンジ蒸し）',
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _recipeCostController,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(
-                    labelText: '費用目安(円)',
-                    hintText: '例: 150',
-                    suffixText: '円',
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: _recipeTimeController,
-                  decoration: InputDecoration(
-                    labelText: '調理時間',
-                    hintText: '例: 10分',
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                '基準の人数（分量計算の基準）',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.orange.shade300),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.remove, size: 18),
-                      onPressed: _baseServings > 1
-                          ? () => setState(() => _baseServings--)
-                          : null,
-                    ),
-                    Text(
-                      '$_baseServings人分',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.add, size: 18),
-                      onPressed: _baseServings < 6
-                          ? () => setState(() => _baseServings++)
-                          : null,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const Divider(height: 24),
-          const Text(
-            '【材料と分量】',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            '※分量を「200g」「1/2個」「大さじ1」のように書くと保存後に人数変更で自動計算されます',
-            style: TextStyle(fontSize: 11, color: Colors.black54),
-          ),
-          const SizedBox(height: 8),
-          ...List.generate(_ingredientRows.length, (idx) {
-            final row = _ingredientRows[idx] as Map;
-            final nameCtrl = row['name'] as TextEditingController;
-            final amountCtrl = row['amount'] as TextEditingController;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8.0),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: TextField(
-                      controller: nameCtrl,
-                      decoration: InputDecoration(
-                        hintText: '材料（例: もやし）',
-                        filled: true,
-                        fillColor: Colors.white,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.menu),
+          onPressed: () => Scaffold.of(context).openDrawer(),
+        ),
+        title: const Text(
+          '新規投稿',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12.0),
+            child: ElevatedButton.icon(
+              onPressed: _isUploading ? null : _submitPost,
+              icon: _isUploading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    flex: 2,
-                    child: TextField(
-                      controller: amountCtrl,
-                      decoration: InputDecoration(
-                        hintText: '分量（例: 1袋）',
-                        filled: true,
-                        fillColor: Colors.white,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_ingredientRows.length > 1)
-                    IconButton(
-                      icon: const Icon(
-                        Icons.remove_circle_outline,
-                        color: Colors.redAccent,
-                      ),
-                      onPressed: () => _removeIngredientRow(idx),
-                    ),
-                ],
-              ),
-            );
-          }),
-          TextButton.icon(
-            onPressed: _addIngredientRow,
-            icon: const Icon(Icons.add_circle_outline),
-            label: const Text('材料を追加する'),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            '【作り方・手順】',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _recipeStepsController,
-            maxLines: 4,
-            decoration: InputDecoration(
-              hintText: '1. 耐熱皿にもやしと豚肉を並べる\n2. ラップをして600Wで4分加熱する...',
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+                    )
+                  : const Icon(Icons.send, size: 16),
+              label: const Text('投稿する'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
               ),
             ),
           ),
         ],
       ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    final uid = currentUser?.uid ?? '';
-
-    return StreamBuilder(
-      stream: uid.isNotEmpty
-          ? FirebaseFirestore.instance.collection('users').doc(uid).snapshots()
-          : null,
-      builder: (context, snapshot) {
-        String currentName =
-            currentUser?.displayName ??
-            currentUser?.email?.split('@')[0] ??
-            '名無しユーザー';
-        String currentIconBase64 = '';
-
-        if (snapshot.hasData && snapshot.data != null) {
-          final doc = snapshot.data as DocumentSnapshot;
-          if (doc.exists && doc.data() != null) {
-            final data = Map.from(doc.data() as Map);
-            if (data['userName'] != null &&
-                data['userName'].toString().trim().isNotEmpty) {
-              currentName = data['userName'].toString().trim();
-            }
-            if (data['iconBase64'] != null) {
-              currentIconBase64 = data['iconBase64'].toString();
-            }
-          }
-        }
-
-        final iconBytes = _decodeBase64(currentIconBase64);
-        final List currentSubList = List.from(
-          _subCategories[_selectedMainCategory] ?? ['指定なし'],
-        );
-
-        return Scaffold(
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            leading: IconButton(
-              icon: const Icon(Icons.menu),
-              onPressed: () => Scaffold.of(context).openDrawer(),
-            ),
-            title: const Text(
-              '新規投稿',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-            ),
-            actions: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16.0,
-                  vertical: 10.0,
-                ),
-                child: ElevatedButton(
-                  onPressed: _isUploading ? null : _post,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: _isUploading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Text(
-                          'ポスト',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                '🍳 料理レシピとして投稿する（分量・金額計算対応）',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
               ),
-            ],
-          ),
-          body: Column(
-            children: [
-              Expanded(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          CircleAvatar(
-                            backgroundColor: Colors.grey,
-                            backgroundImage: iconBytes != null
-                                ? MemoryImage(iconBytes)
-                                : null,
-                            child: iconBytes == null
-                                ? const Icon(Icons.person, color: Colors.white)
-                                : null,
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  currentName,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15,
-                                  ),
-                                ),
-                                TextField(
-                                  controller: _contentController,
-                                  maxLines: null,
-                                  decoration: const InputDecoration(
-                                    hintText: 'いまどうしてる？（レシピの一言メモや日常のつぶやき）',
-                                    border: InputBorder.none,
-                                  ),
-                                ),
-                                if (_image != null) const SizedBox(height: 12),
-                                if (_image != null)
-                                  Stack(
-                                    children: [
-                                      ConstrainedBox(
-                                        constraints: const BoxConstraints(
-                                          maxHeight: 280,
-                                        ),
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(
-                                            16,
-                                          ),
-                                          child: Image.file(
-                                            _image!,
-                                            fit: BoxFit.contain,
-                                          ),
-                                        ),
-                                      ),
-                                      Positioned(
-                                        top: 8,
-                                        right: 8,
-                                        child: GestureDetector(
-                                          onTap: () {
-                                            setState(() {
-                                              _image = null;
-                                            });
-                                          },
-                                          child: const CircleAvatar(
-                                            backgroundColor: Colors.black54,
-                                            radius: 14,
-                                            child: Icon(
-                                              Icons.close,
-                                              color: Colors.white,
-                                              size: 18,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                              ],
+              subtitle: const Text(
+                'ONにすると材料や人数・金額を入力でき、他の人が人数変更やAI代用案を使えるようになります',
+                style: TextStyle(fontSize: 12),
+              ),
+              value: _isRecipeMode,
+              onChanged: (val) {
+                setState(() {
+                  _isRecipeMode = val;
+                  if (val) {
+                    _selectedMainCategory = '料理';
+                    _selectedSubCategory = '野菜';
+                  }
+                });
+              },
+            ),
+            const Divider(),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField(
+                    value: _selectedMainCategory,
+                    decoration: const InputDecoration(
+                      labelText: 'メインカテゴリ',
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                    ),
+                    items: _mainCategories.map((c) {
+                      final str = c.toString();
+                      return DropdownMenuItem(value: str, child: Text(str));
+                    }).toList(),
+                    onChanged: _isRecipeMode
+                        ? null
+                        : (val) {
+                            if (val != null) {
+                              final nextMain = val.toString();
+                              final nextSubs = List.from(
+                                _subCategories[nextMain] ?? ['指定なし'],
+                              );
+                              setState(() {
+                                _selectedMainCategory = nextMain;
+                                _selectedSubCategory = nextSubs.first
+                                    .toString();
+                              });
+                            }
+                          },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: DropdownButtonFormField(
+                    value: currentSubList.contains(_selectedSubCategory)
+                        ? _selectedSubCategory
+                        : currentSubList.first.toString(),
+                    decoration: const InputDecoration(
+                      labelText: 'サブカテゴリ',
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                    ),
+                    items: currentSubList.map((s) {
+                      final str = s.toString();
+                      return DropdownMenuItem(value: str, child: Text(str));
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          _selectedSubCategory = val.toString();
+                        });
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (_isRecipeMode) ...[
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.orange.shade200),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: _recipeTitleController,
+                      decoration: const InputDecoration(
+                        labelText: '料理名（必須）',
+                        hintText: '例：豚バラとキャベツの旨塩炒め',
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _recipeCostController,
+                            decoration: const InputDecoration(
+                              labelText: '目安費用',
+                              hintText: '例：約180円',
+                              filled: true,
+                              fillColor: Colors.white,
+                              border: OutlineInputBorder(),
                             ),
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      const Divider(),
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8.0),
-                        child: Text(
-                          'タグを選択（「料理」を選ぶとレシピ入力欄が開きます）',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey,
-                            fontSize: 13,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: _recipeTimeController,
+                            decoration: const InputDecoration(
+                              labelText: '調理時間',
+                              hintText: '例：約10分',
+                              filled: true,
+                              fillColor: Colors.white,
+                              border: OutlineInputBorder(),
+                            ),
                           ),
                         ),
-                      ),
-                      SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: _mainCategories.map((main) {
-                            final mainStr = main.toString();
-                            return Padding(
-                              padding: const EdgeInsets.only(right: 8.0),
-                              child: ChoiceChip(
-                                label: Text(mainStr),
-                                selected: _selectedMainCategory == mainStr,
-                                selectedColor: Colors.blue.shade100,
-                                onSelected: (selected) {
-                                  if (selected) {
-                                    setState(() {
-                                      _selectedMainCategory = mainStr;
-                                      final subs =
-                                          _subCategories[mainStr] as List;
-                                      _selectedSubCategory = subs.first
-                                          .toString();
-                                    });
-                                    FocusScope.of(context).unfocus();
-                                  }
-                                },
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      if (_selectedMainCategory != '指定なし')
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: currentSubList.map((sub) {
-                              final subStr = sub.toString();
-                              return Padding(
-                                padding: const EdgeInsets.only(right: 8.0),
-                                child: ChoiceChip(
-                                  label: Text(subStr),
-                                  selected: _selectedSubCategory == subStr,
-                                  selectedColor: Colors.green.shade100,
-                                  onSelected: (selected) {
-                                    if (selected) {
-                                      setState(() {
-                                        _selectedSubCategory = subStr;
-                                      });
-                                      FocusScope.of(context).unfocus();
-                                    }
-                                  },
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                      if (_selectedMainCategory == '料理')
-                        _buildRecipeInputSection(),
-                    ],
-                  ),
-                ),
-              ),
-              const Divider(height: 1),
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16.0,
-                  vertical: 8.0,
-                ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(
-                        Icons.image_outlined,
-                        color: Colors.blue,
-                      ),
-                      onPressed: () => _pickImage(source: ImageSource.gallery),
+                      ],
                     ),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.camera_alt_outlined,
-                        color: Colors.blue,
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          '基準の人数（何人分の分量か）',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        Row(
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.remove_circle_outline),
+                              onPressed: _baseServings > 1
+                                  ? () {
+                                      setState(() {
+                                        _baseServings--;
+                                      });
+                                    }
+                                  : null,
+                            ),
+                            Text(
+                              '$_baseServings人分',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.add_circle_outline),
+                              onPressed: _baseServings < 6
+                                  ? () {
+                                      setState(() {
+                                        _baseServings++;
+                                      });
+                                    }
+                                  : null,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    const Text(
+                      '材料リスト（数値を入れると自動で人数計算されます）',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
                       ),
-                      onPressed: () => _pickImage(source: ImageSource.camera),
+                    ),
+                    const SizedBox(height: 8),
+                    ...List.generate(_ingredientRows.length, (idx) {
+                      final mapRow = _ingredientRows[idx] as Map;
+                      final nameCtrl = mapRow['name'] as TextEditingController;
+                      final amountCtrl =
+                          mapRow['amount'] as TextEditingController;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: TextField(
+                                controller: nameCtrl,
+                                decoration: const InputDecoration(
+                                  hintText: '材料名（例：豚肉）',
+                                  filled: true,
+                                  fillColor: Colors.white,
+                                  isDense: true,
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              flex: 2,
+                              child: TextField(
+                                controller: amountCtrl,
+                                decoration: const InputDecoration(
+                                  hintText: '分量（例：100g）',
+                                  filled: true,
+                                  fillColor: Colors.white,
+                                  isDense: true,
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(
+                                Icons.remove_circle,
+                                color: Colors.redAccent,
+                              ),
+                              onPressed: () => _removeIngredientRow(idx),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                    TextButton.icon(
+                      onPressed: _addIngredientRow,
+                      icon: const Icon(Icons.add),
+                      label: const Text('材料を追加する'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _recipeStepsController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: '作り方・手順',
+                        hintText: '1. 野菜を切る\n2. フライパンで炒める...',
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(),
+                      ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 100),
+              const SizedBox(height: 16),
             ],
-          ),
-        );
-      },
+            TextField(
+              controller: _contentController,
+              maxLines: 5,
+              decoration: InputDecoration(
+                labelText: _isRecipeMode ? 'ひとことコメント・コツなど（任意）' : '投稿内容（必須）',
+                hintText: '一人暮らしの知恵や今日のご飯、質問などを自由に書こう！',
+                border: const OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _pickImage(ImageSource.gallery),
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: const Text('スクショ・画像を選択'),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: () => _pickImage(ImageSource.camera),
+                  icon: const Icon(Icons.camera_alt_outlined),
+                  label: const Text('カメラ'),
+                ),
+              ],
+            ),
+            if (_imageBytes != null) ...[
+              const SizedBox(height: 12),
+              Stack(
+                alignment: Alignment.topRight,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.memory(_imageBytes!, fit: BoxFit.contain),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const CircleAvatar(
+                      radius: 14,
+                      backgroundColor: Colors.black54,
+                      child: Icon(Icons.close, size: 16, color: Colors.white),
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        _imageBytes = null;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
