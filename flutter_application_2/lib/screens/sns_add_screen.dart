@@ -32,7 +32,7 @@ class _SnsAddScreenState extends State {
   bool _isUploading = false;
   bool _isPickingImage = false;
   bool _isRecipeMode = false;
-  Uint8List? _imageBytes;
+  final List _imageBytesList = [];
 
   final List _mainCategories = ['指定なし', '料理', '掃除', '収納', 'その他'];
   final Map _subCategories = {
@@ -91,7 +91,42 @@ class _SnsAddScreenState extends State {
     });
   }
 
-  Future _pickImage(ImageSource source) async {
+  Future _pickMultipleImages() async {
+    if (_isPickingImage) return;
+    setState(() {
+      _isPickingImage = true;
+    });
+
+    try {
+      final picker = ImagePicker();
+      final pickedFiles = await picker.pickMultiImage(imageQuality: 85);
+      if (pickedFiles.isNotEmpty) {
+        final List loaded = [];
+        for (final f in pickedFiles) {
+          final b = await f.readAsBytes();
+          loaded.add(b);
+        }
+        if (mounted) {
+          setState(() {
+            _imageBytesList.addAll(loaded);
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('画像の読み込みに失敗しました: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isPickingImage = false;
+        });
+      }
+    }
+  }
+
+  Future _pickCameraImage() async {
     if (_isPickingImage) return;
     setState(() {
       _isPickingImage = true;
@@ -100,23 +135,21 @@ class _SnsAddScreenState extends State {
     try {
       final picker = ImagePicker();
       final pickedFile = await picker.pickImage(
-        source: source,
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 75,
+        source: ImageSource.camera,
+        imageQuality: 85,
       );
       if (pickedFile != null) {
         final bytes = await pickedFile.readAsBytes();
         if (mounted) {
           setState(() {
-            _imageBytes = bytes;
+            _imageBytesList.add(bytes);
           });
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('画像の読み込みに失敗しました: $e')));
+            .showSnackBar(SnackBar(content: Text('カメラ画像の読み込みに失敗しました: $e')));
       }
     } finally {
       if (mounted) {
@@ -170,7 +203,7 @@ class _SnsAddScreenState extends State {
     final content = _contentController.text.trim();
     final recipeTitle = _recipeTitleController.text.trim();
 
-    if (!_isRecipeMode && content.isEmpty && _imageBytes == null) {
+    if (!_isRecipeMode && content.isEmpty && _imageBytesList.isEmpty) {
       messenger.showSnackBar(
         const SnackBar(content: Text('投稿内容または画像を入力してください')),
       );
@@ -237,8 +270,11 @@ class _SnsAddScreenState extends State {
         }
       }
 
-      final String imageBase64 = _imageBytes != null
-          ? base64Encode(_imageBytes!)
+      final List imagesBase64List = _imageBytesList
+          .map((b) => base64Encode(b as Uint8List))
+          .toList();
+      final String firstImageBase64 = imagesBase64List.isNotEmpty
+          ? imagesBase64List.first.toString()
           : '';
 
       final docRef = await FirebaseFirestore.instance.collection('posts').add({
@@ -249,8 +285,9 @@ class _SnsAddScreenState extends State {
         'subCategory': _selectedSubCategory,
         'title': _isRecipeMode ? recipeTitle : '',
         'content': content,
-        'hasImage': _imageBytes != null,
-        'imageBase64': imageBase64,
+        'hasImage': imagesBase64List.isNotEmpty,
+        'imageBase64': firstImageBase64,
+        'imagesBase64': imagesBase64List,
         'isRecipePost': _isRecipeMode,
         'recipeCost': _isRecipeMode ? _recipeCostController.text.trim() : '',
         'recipeTime': _isRecipeMode ? _recipeTimeController.text.trim() : '',
@@ -284,7 +321,7 @@ class _SnsAddScreenState extends State {
           (mapRow['name'] as TextEditingController).clear();
           (mapRow['amount'] as TextEditingController).clear();
         }
-        _imageBytes = null;
+        _imageBytesList.clear();
         _isUploading = false;
       });
 
@@ -609,47 +646,80 @@ class _SnsAddScreenState extends State {
               ),
             ),
             const SizedBox(height: 16),
-            Row(
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
               children: [
                 OutlinedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.gallery),
+                  onPressed: _pickMultipleImages,
                   icon: const Icon(Icons.photo_library_outlined),
-                  label: const Text('スクショ・画像を選択'),
+                  label: Text(
+                    _imageBytesList.isEmpty
+                        ? 'スクショ・画像を選択（複数可）'
+                        : '画像をさらに追加（現在${_imageBytesList.length}枚）',
+                  ),
                 ),
-                const SizedBox(width: 12),
                 OutlinedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.camera),
+                  onPressed: _pickCameraImage,
                   icon: const Icon(Icons.camera_alt_outlined),
                   label: const Text('カメラ'),
                 ),
-              ],
-            ),
-            if (_imageBytes != null) ...[
-              const SizedBox(height: 12),
-              Stack(
-                alignment: Alignment.topRight,
-                children: [
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 260),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.memory(_imageBytes!, fit: BoxFit.contain),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const CircleAvatar(
-                      radius: 14,
-                      backgroundColor: Colors.black54,
-                      child: Icon(Icons.close, size: 16, color: Colors.white),
-                    ),
+                if (_imageBytesList.isNotEmpty)
+                  TextButton.icon(
                     onPressed: () {
                       setState(() {
-                        _imageBytes = null;
+                        _imageBytesList.clear();
                       });
                     },
+                    icon: const Icon(Icons.delete_sweep, color: Colors.red),
+                    label: const Text(
+                      'すべてクリア',
+                      style: TextStyle(color: Colors.red),
+                    ),
                   ),
-                ],
-              ),
+              ],
+            ),
+            if (_imageBytesList.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              ...List.generate(_imageBytesList.length, (idx) {
+                final bytes = _imageBytesList[idx] as Uint8List;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 14.0),
+                  child: Stack(
+                    alignment: Alignment.topRight,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.memory(
+                          bytes,
+                          width: double.infinity,
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(6.0),
+                        child: IconButton(
+                          icon: const CircleAvatar(
+                            radius: 15,
+                            backgroundColor: Colors.black87,
+                            child: Icon(
+                              Icons.close,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _imageBytesList.removeAt(idx);
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
             ],
           ],
         ),

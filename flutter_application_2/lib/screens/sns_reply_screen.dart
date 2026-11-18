@@ -9,7 +9,11 @@ class SnsReplyScreen extends StatefulWidget {
   final String postId;
   final dynamic originalPost;
 
-  const SnsReplyScreen({super.key, required this.postId, this.originalPost});
+  const SnsReplyScreen({
+    super.key,
+    required this.postId,
+    this.originalPost,
+  });
 
   @override
   State createState() => _SnsReplyScreenState();
@@ -23,25 +27,41 @@ class _SnsReplyScreenState extends State {
   bool _isSending = false;
 
   Uint8List? _decodeBase64(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
+    if (base64String == null || base64String.trim().isEmpty) return null;
     try {
-      return base64Decode(base64String);
+      final cleaned = base64String.contains(',')
+          ? base64String.split(',').last.replaceAll(RegExp(r'\s+'), '')
+          : base64String.replaceAll(RegExp(r'\s+'), '');
+      if (cleaned.isEmpty) return null;
+      return base64Decode(cleaned);
     } catch (e) {
       return null;
     }
   }
 
-  void _openFullScreenImage(
-    BuildContext context,
-    Uint8List imageBytes,
-    String heroTag,
-  ) {
+  List _extractPostImages(dynamic postData) {
+    if (postData == null) return [];
+    final List result = [];
+    if (postData['imagesBase64'] != null && postData['imagesBase64'] is List) {
+      for (final item in List.from(postData['imagesBase64'])) {
+        final decoded = _decodeBase64(item?.toString());
+        if (decoded != null) result.add(decoded);
+      }
+    }
+    if (result.isEmpty && postData['imageBase64'] != null) {
+      final decoded = _decodeBase64(postData['imageBase64']?.toString());
+      if (decoded != null) result.add(decoded);
+    }
+    return result;
+  }
+
+  void _openFullScreenImage(Uint8List imageBytes) {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
-        barrierColor: Colors.black,
+        barrierColor: Colors.black87,
         barrierDismissible: true,
-        pageBuilder: (pageContext, animation, secondaryAnimation) {
+        pageBuilder: (pageContext, animation, _) {
           return FadeTransition(
             opacity: animation,
             child: Scaffold(
@@ -50,26 +70,19 @@ class _SnsReplyScreenState extends State {
                 backgroundColor: Colors.black,
                 foregroundColor: Colors.white,
                 elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
-                  onPressed: () => Navigator.of(pageContext).pop(),
-                ),
               ),
               body: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => Navigator.of(pageContext).pop(),
                 child: Center(
                   child: InteractiveViewer(
+                    panEnabled: true,
                     minScale: 0.5,
                     maxScale: 4.0,
-                    child: Hero(
-                      tag: heroTag,
-                      child: Image.memory(
-                        imageBytes,
-                        fit: BoxFit.contain,
-                        width: double.infinity,
-                        height: double.infinity,
-                      ),
+                    child: Image.memory(
+                      imageBytes,
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
                     ),
                   ),
                 ),
@@ -90,8 +103,10 @@ class _SnsReplyScreenState extends State {
     try {
       final user = FirebaseAuth.instance.currentUser;
       final uid = user?.uid ?? '';
-      String userName =
-          user?.displayName ?? user?.email?.split('@')[0] ?? '名無しユーザー';
+      String userName = user?.displayName ?? '';
+      if (userName.isEmpty) {
+        userName = (user?.email ?? '名無し').split('@').first;
+      }
       String userIconBase64 = '';
 
       if (uid.isNotEmpty) {
@@ -111,9 +126,8 @@ class _SnsReplyScreenState extends State {
         }
       }
 
-      final postRef = FirebaseFirestore.instance
-          .collection('posts')
-          .doc(_postId);
+      final postRef =
+          FirebaseFirestore.instance.collection('posts').doc(_postId);
 
       await postRef.collection('replies').add({
         'userId': uid,
@@ -123,14 +137,17 @@ class _SnsReplyScreenState extends State {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      await postRef.update({'replies': FieldValue.increment(1)});
+      await postRef.update({
+        'replies': FieldValue.increment(1),
+      });
 
       if (!mounted) return;
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('返信の送信に失敗しました')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('返信の送信に失敗しました')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isSending = false);
@@ -146,55 +163,37 @@ class _SnsReplyScreenState extends State {
 
   @override
   Widget build(BuildContext context) {
-    final dynamic post = _originalPost;
-    final String origName = post != null
-        ? (post['userName']?.toString() ?? '投稿者')
-        : '投稿者';
-    final String origContent = post != null
-        ? (post['content']?.toString() ?? '')
-        : '';
-    final Uint8List? origIconBytes = post != null
-        ? _decodeBase64(post['userIconBase64']?.toString())
-        : null;
-    final Uint8List? origImageBytes = post != null
-        ? _decodeBase64(post['imageBase64']?.toString())
-        : null;
-    final String heroTag = 'reply_img_$_postId';
+    final post = _originalPost;
+    final String postUserId = post != null ? (post['userId']?.toString() ?? '') : '';
+    final String rawName = post != null ? (post['userName']?.toString() ?? '名無し') : '名無し';
+    final String rawIcon = post != null ? (post['userIconBase64']?.toString() ?? '') : '';
+    final List postImages = _extractPostImages(post);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('返信を投稿'),
-        elevation: 0,
-        backgroundColor: Colors.transparent,
+        title: const Text(
+          '返信する',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         actions: [
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 16.0,
-              vertical: 10.0,
-            ),
+            padding: const EdgeInsets.only(right: 12.0),
             child: ElevatedButton(
               onPressed: _isSending ? null : _submitReply,
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.blue,
                 foregroundColor: Colors.white,
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
               ),
               child: _isSending
                   ? const SizedBox(
-                      width: 18,
-                      height: 18,
+                      width: 16,
+                      height: 16,
                       child: CircularProgressIndicator(
-                        color: Colors.white,
                         strokeWidth: 2,
+                        color: Colors.white,
                       ),
                     )
-                  : const Text(
-                      '返信',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
+                  : const Text('返信を送信'),
             ),
           ),
         ],
@@ -204,83 +203,126 @@ class _SnsReplyScreenState extends State {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (post != null) ...[
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CircleAvatar(
-                    radius: 18,
-                    backgroundColor: Colors.grey,
-                    backgroundImage: origIconBytes != null
-                        ? MemoryImage(origIconBytes)
-                        : null,
-                    child: origIconBytes == null
-                        ? const Icon(
-                            Icons.person,
-                            color: Colors.white,
-                            size: 20,
-                          )
-                        : null,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
+            if (post != null)
+              StreamBuilder(
+                stream: postUserId.isNotEmpty
+                    ? FirebaseFirestore.instance
+                        .collection('users')
+                        .doc(postUserId)
+                        .snapshots()
+                    : null,
+                builder: (context, userSnap) {
+                  String displayUserName = rawName;
+                  String displayIconBase64 = rawIcon;
+
+                  if (userSnap.hasData && userSnap.data != null) {
+                    final uDoc = userSnap.data as DocumentSnapshot;
+                    if (uDoc.exists && uDoc.data() != null) {
+                      final uData = uDoc.data() as Map;
+                      if (uData['userName'] != null &&
+                          uData['userName'].toString().trim().isNotEmpty) {
+                        displayUserName = uData['userName'].toString();
+                      }
+                      if (uData['iconBase64'] != null &&
+                          uData['iconBase64'].toString().isNotEmpty) {
+                        displayIconBase64 = uData['iconBase64'].toString();
+                      }
+                    }
+                  }
+
+                  final Uint8List? iconBytes = _decodeBase64(displayIconBase64);
+
+                  return Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade300),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          origName,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          origContent,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: Colors.black87,
-                          ),
-                        ),
-                        if (origImageBytes != null) ...[
-                          const SizedBox(height: 8),
-                          GestureDetector(
-                            onTap: () => _openFullScreenImage(
-                              context,
-                              origImageBytes,
-                              heroTag,
+                        Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 18,
+                              backgroundColor: Colors.blue.shade100,
+                              backgroundImage: iconBytes != null
+                                  ? MemoryImage(iconBytes)
+                                  : null,
+                              child: iconBytes == null
+                                  ? const Icon(
+                                      Icons.person,
+                                      size: 20,
+                                      color: Colors.blue,
+                                    )
+                                  : null,
                             ),
-                            child: Hero(
-                              tag: heroTag,
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxHeight: 180,
-                                ),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: Image.memory(
-                                    origImageBytes,
-                                    fit: BoxFit.contain,
-                                  ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                displayUserName,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
                                 ),
                               ),
                             ),
+                          ],
+                        ),
+                        if (post['title'] != null &&
+                            post['title'].toString().trim().isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            post['title'].toString(),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
                           ),
+                        ],
+                        if (post['content'] != null &&
+                            post['content'].toString().trim().isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            post['content'].toString(),
+                            style: const TextStyle(fontSize: 14, height: 1.4),
+                          ),
+                        ],
+                        if (postImages.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          ...List.generate(postImages.length, (idx) {
+                            final imgBytes = postImages[idx] as Uint8List;
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10.0),
+                              child: GestureDetector(
+                                onTap: () => _openFullScreenImage(imgBytes),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Image.memory(
+                                    imgBytes,
+                                    width: double.infinity,
+                                    fit: BoxFit.contain,
+                                    gaplessPlayback: true,
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
                         ],
                       ],
                     ),
-                  ),
-                ],
+                  );
+                },
               ),
-              const Divider(height: 32),
-            ],
+            const SizedBox(height: 16),
             TextField(
               controller: _replyController,
               autofocus: true,
-              maxLines: null,
+              maxLines: 6,
               decoration: const InputDecoration(
-                hintText: '返信を入力...',
-                border: InputBorder.none,
+                hintText: '返信を入力してください...',
+                border: OutlineInputBorder(),
               ),
             ),
           ],

@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -77,9 +76,13 @@ class _MainScreenState extends State {
   ];
 
   Uint8List? _decodeIcon(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
+    if (base64String == null || base64String.trim().isEmpty) return null;
     try {
-      return base64Decode(base64String);
+      final cleaned = base64String.contains(',')
+          ? base64String.split(',').last.replaceAll(RegExp(r'\s+'), '')
+          : base64String.replaceAll(RegExp(r'\s+'), '');
+      if (cleaned.isEmpty) return null;
+      return base64Decode(cleaned);
     } catch (e) {
       return null;
     }
@@ -424,21 +427,24 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
   late TextEditingController _nameController;
   String _birthdayStr = '';
   String _iconBase64 = '';
+  Uint8List? _previewIconBytes;
   final List _selectedTags = [];
   bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
-    final initName =
-        widget.initialUserData['userName']?.toString() ??
+    final initName = widget.initialUserData['userName']?.toString() ??
         FirebaseAuth.instance.currentUser?.displayName ??
         '';
     _nameController = TextEditingController(text: initName);
     _birthdayStr = widget.initialUserData['birthday']?.toString() ?? '';
     _iconBase64 = widget.initialUserData['iconBase64']?.toString() ?? '';
+    _previewIconBytes = _decodeIcon(_iconBase64);
     if (widget.initialUserData['interestedTags'] != null) {
-      _selectedTags.addAll(List.from(widget.initialUserData['interestedTags']));
+      _selectedTags.addAll(
+        List.from(widget.initialUserData['interestedTags']),
+      );
     }
   }
 
@@ -449,9 +455,13 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
   }
 
   Uint8List? _decodeIcon(String base64Str) {
-    if (base64Str.isEmpty) return null;
+    if (base64Str.trim().isEmpty) return null;
     try {
-      return base64Decode(base64Str);
+      final cleaned = base64Str.contains(',')
+          ? base64Str.split(',').last.replaceAll(RegExp(r'\s+'), '')
+          : base64Str.replaceAll(RegExp(r'\s+'), '');
+      if (cleaned.isEmpty) return null;
+      return base64Decode(cleaned);
     } catch (e) {
       return null;
     }
@@ -462,17 +472,26 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
       final picker = ImagePicker();
       final picked = await picker.pickImage(
         source: source,
-        maxWidth: 300,
-        maxHeight: 300,
-        imageQuality: 70,
+        maxWidth: 600,
+        maxHeight: 600,
+        imageQuality: 85,
       );
-      if (picked != null && mounted) {
-        final bytes = await File(picked.path).readAsBytes();
-        setState(() {
-          _iconBase64 = base64Encode(bytes);
-        });
+      if (picked != null) {
+        final bytes = await picked.readAsBytes();
+        if (mounted) {
+          setState(() {
+            _previewIconBytes = bytes;
+            _iconBase64 = base64Encode(bytes);
+          });
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('画像の読み込みに失敗しました: $e')),
+        );
+      }
+    }
   }
 
   Future _pickBirthday() async {
@@ -498,7 +517,9 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
     final newName = _nameController.text.trim();
 
     if (newName.isEmpty) {
-      messenger.showSnackBar(const SnackBar(content: Text('ユーザー名を入力してください')));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('ユーザー名を入力してください')),
+      );
       return;
     }
     if (newName.length > 15) {
@@ -525,7 +546,9 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
           _isSaving = false;
         });
         messenger.showSnackBar(
-          const SnackBar(content: Text('このユーザー名は既に使われています。別の名前を入力してください。')),
+          const SnackBar(
+            content: Text('このユーザー名は既に使われています。別の名前を入力してください。'),
+          ),
         );
         return;
       }
@@ -543,21 +566,23 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
       }
 
       if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(content: Text('アカウント情報を更新しました！')));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('アカウント情報を更新しました！')),
+      );
       navigator.pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
       });
-      messenger.showSnackBar(SnackBar(content: Text('更新に失敗しました: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('更新に失敗しました: $e')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final iconBytes = _decodeIcon(_iconBase64);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text(
@@ -574,13 +599,13 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
               child: Column(
                 children: [
                   CircleAvatar(
-                    radius: 48,
+                    radius: 52,
                     backgroundColor: Colors.blue.shade50,
-                    backgroundImage: iconBytes != null
-                        ? MemoryImage(iconBytes)
+                    backgroundImage: _previewIconBytes != null
+                        ? MemoryImage(_previewIconBytes!)
                         : null,
-                    child: iconBytes == null
-                        ? const Icon(Icons.person, size: 48, color: Colors.blue)
+                    child: _previewIconBytes == null
+                        ? const Icon(Icons.person, size: 52, color: Colors.blue)
                         : null,
                   ),
                   const SizedBox(height: 12),
@@ -621,7 +646,10 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            const Text('生年月日', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              '生年月日',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             InkWell(
               onTap: _pickBirthday,
@@ -630,7 +658,9 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.cake_outlined),
                 ),
-                child: Text(_birthdayStr.isNotEmpty ? _birthdayStr : 'タップして選択'),
+                child: Text(
+                  _birthdayStr.isNotEmpty ? _birthdayStr : 'タップして選択',
+                ),
               ),
             ),
             const SizedBox(height: 24),
@@ -760,14 +790,18 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         }, SetOptions(merge: true));
       }
       if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(content: Text('設定を保存しました！')));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('設定を保存しました！')),
+      );
       navigator.pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
       });
-      messenger.showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('保存に失敗しました: $e')),
+      );
     }
   }
 

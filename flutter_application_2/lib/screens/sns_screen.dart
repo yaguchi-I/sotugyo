@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -21,6 +23,8 @@ class _SnsScreenState extends State {
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
   final String currentEmailPrefix =
       (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
+
+  bool _isDeveloper = true;
 
   final Map _servingsPerPost = {};
   final Map _postImageCache = {};
@@ -49,6 +53,48 @@ class _SnsScreenState extends State {
     } catch (e) {
       return null;
     }
+  }
+
+  List _extractPostImages(String docId, dynamic post) {
+    final List result = [];
+    if (post['imagesBase64'] != null && post['imagesBase64'] is List) {
+      final rawList = List.from(post['imagesBase64']);
+      for (int i = 0; i < rawList.length; i++) {
+        final bytes = _decodeAndCache(
+          '${docId}_$i',
+          rawList[i]?.toString(),
+          _postImageCache,
+        );
+        if (bytes != null) {
+          result.add(bytes);
+        }
+      }
+    }
+    if (result.isEmpty && post['imageBase64'] != null) {
+      final bytes = _decodeAndCache(
+        '${docId}_single',
+        post['imageBase64']?.toString(),
+        _postImageCache,
+      );
+      if (bytes != null) {
+        result.add(bytes);
+      }
+    }
+    return result;
+  }
+
+  int _readReactionCount(dynamic rawCount, List fallbackList) {
+    int? parsedCount;
+    if (rawCount is num) {
+      parsedCount = rawCount.toInt();
+    } else if (rawCount != null) {
+      parsedCount = int.tryParse(rawCount.toString().trim());
+    }
+    if (parsedCount != null) {
+      final safeVal = parsedCount < 0 ? 0 : parsedCount;
+      return max(safeVal, fallbackList.length);
+    }
+    return fallbackList.length;
   }
 
   String _getTopicKey(dynamic post) {
@@ -219,92 +265,12 @@ class _SnsScreenState extends State {
     );
   }
 
-  void _openFullScreenImage(Uint8List imageBytes) {
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black87,
-        barrierDismissible: true,
-        pageBuilder: (pageContext, animation, secondaryAnimation) {
-          return FadeTransition(
-            opacity: animation,
-            child: Scaffold(
-              backgroundColor: Colors.black,
-              appBar: AppBar(
-                backgroundColor: Colors.black,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
-                  onPressed: () => Navigator.of(pageContext).pop(),
-                ),
-              ),
-              body: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(pageContext).pop(),
-                child: Center(
-                  child: InteractiveViewer(
-                    panEnabled: true,
-                    minScale: 0.5,
-                    maxScale: 4.0,
-                    child: Image.memory(
-                      imageBytes,
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildTimelineImage(Uint8List imageBytes, String docId) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12.0),
-      child: GestureDetector(
-        onTap: () => _openFullScreenImage(imageBytes),
-        child: Container(
-          width: double.infinity,
-          constraints: const BoxConstraints(maxHeight: 300),
-          decoration: BoxDecoration(
-            color: Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.grey.shade200),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Image.memory(
-            imageBytes,
-            key: ValueKey('post_img_$docId'),
-            fit: BoxFit.contain,
-            gaplessPlayback: true,
-            filterQuality: FilterQuality.medium,
-            errorBuilder: (context, error, stackTrace) {
-              return const SizedBox(
-                height: 120,
-                child: Center(
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    color: Colors.grey,
-                    size: 36,
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
   Future _toggleReaction(
     String docId,
     String listField,
     String countField,
     List currentUsers,
+    int currentDisplayCount,
   ) async {
     if (currentUserId.isEmpty) return;
     final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
@@ -312,17 +278,131 @@ class _SnsScreenState extends State {
 
     try {
       if (isAdded) {
+        final nextCount = currentDisplayCount > 0 ? currentDisplayCount - 1 : 0;
         await docRef.update({
           listField: FieldValue.arrayRemove([currentUserId]),
-          countField: FieldValue.increment(-1),
+          countField: nextCount,
         });
       } else {
+        final nextCount = currentDisplayCount + 1;
         await docRef.update({
           listField: FieldValue.arrayUnion([currentUserId]),
-          countField: FieldValue.increment(1),
+          countField: nextCount,
         });
       }
     } catch (e) {}
+  }
+
+  Future _showDeveloperEditCountsDialog({
+    required String docId,
+    required int currentLikes,
+    required int currentHelpfuls,
+    required int currentReplies,
+  }) async {
+    final likesCtrl = TextEditingController(text: currentLikes.toString());
+    final helpfulsCtrl = TextEditingController(
+      text: currentHelpfuls.toString(),
+    );
+    final repliesCtrl = TextEditingController(text: currentReplies.toString());
+    final messenger = ScaffoldMessenger.of(context);
+
+    final saved = await showDialog(
+      context: context,
+      builder: (dialogCtx) {
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.build_circle, color: Colors.deepPurple),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '開発者専用：数値の変更',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '対象投稿ID: $docId',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: likesCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '❤️ いいね数 (likes)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: helpfulsCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '💡 役立った・電球数 (helpfuls)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: repliesCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '💬 返信数 (replies)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogCtx, false),
+              child: const Text('キャンセル'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogCtx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('保存する'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (saved == true) {
+      final newLikes = int.tryParse(likesCtrl.text.trim()) ?? currentLikes;
+      final newHelpfuls =
+          int.tryParse(helpfulsCtrl.text.trim()) ?? currentHelpfuls;
+      final newReplies =
+          int.tryParse(repliesCtrl.text.trim()) ?? currentReplies;
+
+      try {
+        await FirebaseFirestore.instance.collection('posts').doc(docId).update({
+          'likes': newLikes < 0 ? 0 : newLikes,
+          'helpfuls': newHelpfuls < 0 ? 0 : newHelpfuls,
+          'replies': newReplies < 0 ? 0 : newReplies,
+        });
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              '🛠️ いいね:$newLikes / 電球:$newHelpfuls / 返信:$newReplies に更新しました！',
+            ),
+          ),
+        );
+      } catch (e) {
+        messenger.showSnackBar(SnackBar(content: Text('更新に失敗しました: $e')));
+      }
+    }
   }
 
   Future _deletePost(String docId) async {
@@ -347,7 +427,6 @@ class _SnsScreenState extends State {
 
     if (confirm == true) {
       await FirebaseFirestore.instance.collection('posts').doc(docId).delete();
-      _postImageCache.remove(docId);
       messenger.showSnackBar(const SnackBar(content: Text('投稿を削除しました')));
     }
   }
@@ -415,6 +494,9 @@ class _SnsScreenState extends State {
     required bool isTopicDemoted,
     required String targetUserKey,
     required String displayUserName,
+    required int currentLikes,
+    required int currentHelpfuls,
+    required int currentReplies,
   }) {
     showModalBottomSheet(
       context: context,
@@ -422,19 +504,46 @@ class _SnsScreenState extends State {
         return SafeArea(
           child: Wrap(
             children: [
-              if (isMyPost)
+              if (_isDeveloper)
+                ListTile(
+                  leading: const Icon(
+                    Icons.build_circle_outlined,
+                    color: Colors.deepPurple,
+                  ),
+                  title: const Text(
+                    '🛠️ [開発者専用] いいね・電球・返信数を変更する',
+                    style: TextStyle(
+                      color: Colors.deepPurple,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '現在の値 → いいね:$currentLikes / 電球:$currentHelpfuls / 返信:$currentReplies',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _showDeveloperEditCountsDialog(
+                      docId: docId,
+                      currentLikes: currentLikes,
+                      currentHelpfuls: currentHelpfuls,
+                      currentReplies: currentReplies,
+                    );
+                  },
+                ),
+              if (isMyPost || _isDeveloper)
                 ListTile(
                   leading: const Icon(Icons.delete_outline, color: Colors.red),
-                  title: const Text(
-                    'この投稿を削除する',
-                    style: TextStyle(color: Colors.red),
+                  title: Text(
+                    isMyPost ? 'この投稿を削除する' : '🛠️ [開発者専用] この投稿を削除する',
+                    style: const TextStyle(color: Colors.red),
                   ),
                   onTap: () {
                     Navigator.pop(sheetContext);
                     _deletePost(docId);
                   },
-                )
-              else ...[
+                ),
+              if (!isMyPost) ...[
                 if (topicKey.isNotEmpty)
                   ListTile(
                     leading: Icon(
@@ -495,16 +604,31 @@ class _SnsScreenState extends State {
     return DefaultTabController(
       length: 2,
       child: Scaffold(
+        backgroundColor: Colors.grey.shade100,
         appBar: AppBar(
+          backgroundColor: Colors.white,
           leading: IconButton(
             icon: const Icon(Icons.menu),
             onPressed: () {
               Scaffold.of(context).openDrawer();
             },
           ),
-          title: const Text(
-            'タイムライン',
-            style: TextStyle(fontWeight: FontWeight.bold),
+          title: GestureDetector(
+            onLongPress: () {
+              setState(() {
+                _isDeveloper = !_isDeveloper;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(_isDeveloper ? '🛠️ 開発者モード：ON' : '開発者モード：OFF'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
+            child: const Text(
+              'タイムライン',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           bottom: const TabBar(
             labelColor: Colors.blue,
@@ -652,89 +776,97 @@ class _SnsScreenState extends State {
       );
     }
 
-    return Column(
-      children: [
-        if (isRecommendedTab && interestedTags.isNotEmpty)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            color: Colors.blue.shade50,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.auto_awesome,
-                    size: 16,
-                    color: Colors.blue.shade700,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '優先表示中のタグ: ',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.blue.shade900,
-                    ),
-                  ),
-                  ...interestedTags.map((t) {
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 6.0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.blue.shade200),
-                        ),
-                        child: Text(
-                          t.toString(),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.blue.shade800,
-                          ),
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680),
+        child: Column(
+          children: [
+            if (isRecommendedTab && interestedTags.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
+                color: Colors.blue.shade50,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.auto_awesome,
+                        size: 16,
+                        color: Colors.blue.shade700,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '優先表示中のタグ: ',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue.shade900,
                         ),
                       ),
-                    );
-                  }),
-                ],
+                      ...interestedTags.map((t) {
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 6.0),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.blue.shade200),
+                            ),
+                            child: Text(
+                              t.toString(),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.blue.shade800,
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.only(bottom: 110),
+                itemCount: docs.length,
+                itemBuilder: (context, index) {
+                  final doc = docs[index] as QueryDocumentSnapshot;
+                  final post = doc.data() as Map;
+                  final topicKey = _getTopicKey(post);
+                  final isTopicDemoted =
+                      topicKey.isNotEmpty &&
+                      lessInterestedTopics.contains(topicKey);
+                  final score = _calcRecommendScore(
+                    post,
+                    interestedTags,
+                    lessInterestedTopics,
+                  );
+                  final isMatchedInterest = isRecommendedTab && score >= 2;
+
+                  return _buildPostCard(
+                    post: post,
+                    docId: doc.id,
+                    context: context,
+                    topicKey: topicKey,
+                    isTopicDemoted: isTopicDemoted,
+                    isMatchedInterest: isMatchedInterest,
+                    missingAppliances: missingAppliances,
+                  );
+                },
               ),
             ),
-          ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.only(bottom: 110),
-            itemCount: docs.length,
-            itemBuilder: (context, index) {
-              final doc = docs[index] as QueryDocumentSnapshot;
-              final post = doc.data() as Map;
-              final topicKey = _getTopicKey(post);
-              final isTopicDemoted =
-                  topicKey.isNotEmpty &&
-                  lessInterestedTopics.contains(topicKey);
-              final score = _calcRecommendScore(
-                post,
-                interestedTags,
-                lessInterestedTopics,
-              );
-              final isMatchedInterest = isRecommendedTab && score >= 2;
-
-              return _buildPostCard(
-                post: post,
-                docId: doc.id,
-                context: context,
-                topicKey: topicKey,
-                isTopicDemoted: isTopicDemoted,
-                isMatchedInterest: isMatchedInterest,
-                missingAppliances: missingAppliances,
-              );
-            },
-          ),
+          ],
         ),
-      ],
+      ),
     );
   }
 
@@ -748,7 +880,7 @@ class _SnsScreenState extends State {
     required List missingAppliances,
   }) {
     final bool isRecipePost = post['isRecipePost'] == true;
-    final int replies = post['replies'] ?? 0;
+    final int replies = _readReactionCount(post['replies'], const []);
 
     final List likedUsers = post['likedUsers'] != null
         ? List.from(post['likedUsers'])
@@ -764,8 +896,12 @@ class _SnsScreenState extends State {
     final bool isHelpful = helpfulUsers.contains(currentUserId);
     final bool isSaved = savedUsers.contains(currentUserId);
 
-    final int likesCount = likedUsers.length;
-    final int helpfulsCount = helpfulUsers.length;
+    final int likesCount = _readReactionCount(post['likes'], likedUsers);
+    final int helpfulsCount = _readReactionCount(
+      post['helpfuls'],
+      helpfulUsers,
+    );
+    final int savesCount = _readReactionCount(post['saves'], savedUsers);
 
     final String postUserId = post['userId']?.toString() ?? '';
     final String rawUserName = post['userName']?.toString() ?? '名無し';
@@ -780,11 +916,7 @@ class _SnsScreenState extends State {
         ? postUserId
         : rawUserName;
 
-    final Uint8List? postImageBytes = _decodeAndCache(
-      docId,
-      post['imageBase64']?.toString(),
-      _postImageCache,
-    );
+    final List postImages = _extractPostImages(docId, post);
 
     return StreamBuilder(
       stream: targetLookupUid.isNotEmpty
@@ -849,6 +981,8 @@ class _SnsScreenState extends State {
               color: Colors.white,
               border: Border(
                 bottom: BorderSide(color: Colors.grey.shade200, width: 1),
+                left: BorderSide(color: Colors.grey.shade200, width: 0.5),
+                right: BorderSide(color: Colors.grey.shade200, width: 0.5),
               ),
             ),
             child: Column(
@@ -961,6 +1095,9 @@ class _SnsScreenState extends State {
                         isTopicDemoted: isTopicDemoted,
                         targetUserKey: targetUserKey,
                         displayUserName: displayUserName,
+                        currentLikes: likesCount,
+                        currentHelpfuls: helpfulsCount,
+                        currentReplies: replies,
                       ),
                     ),
                   ],
@@ -1161,8 +1298,14 @@ class _SnsScreenState extends State {
                     ),
                   ),
                 ],
-                if (postImageBytes != null)
-                  _buildTimelineImage(postImageBytes, docId),
+                if (postImages.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10.0),
+                    child: PostImageCarousel(
+                      imagesList: postImages,
+                      keyPrefix: 'tl_$docId',
+                    ),
+                  ),
                 const SizedBox(height: 12),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -1192,6 +1335,7 @@ class _SnsScreenState extends State {
                         'likedUsers',
                         'likes',
                         likedUsers,
+                        likesCount,
                       ),
                     ),
                     _buildActionButton(
@@ -1205,6 +1349,7 @@ class _SnsScreenState extends State {
                         'helpfulUsers',
                         'helpfuls',
                         helpfulUsers,
+                        helpfulsCount,
                       ),
                     ),
                     _buildActionButton(
@@ -1216,6 +1361,7 @@ class _SnsScreenState extends State {
                         'savedUsers',
                         'saves',
                         savedUsers,
+                        savesCount,
                       ),
                     ),
                   ],
@@ -1249,6 +1395,315 @@ class _SnsScreenState extends State {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class PostImageCarousel extends StatefulWidget {
+  final List imagesList;
+  final String keyPrefix;
+
+  const PostImageCarousel({
+    super.key,
+    required this.imagesList,
+    required this.keyPrefix,
+  });
+
+  @override
+  State createState() => _PostImageCarouselState();
+}
+
+class _PostImageCarouselState extends State {
+  final PageController _pageController = PageController();
+  int _currentIndex = 0;
+
+  List get _images => (widget as PostImageCarousel).imagesList;
+  String get _prefix => (widget as PostImageCarousel).keyPrefix;
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  void _openFullScreenGallery(int initialIndex) {
+    final PageController fullCtrl = PageController(initialPage: initialIndex);
+    int currentFullIdx = initialIndex;
+
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierColor: Colors.black87,
+        barrierDismissible: true,
+        pageBuilder: (pageContext, animation, secondaryAnimation) {
+          return StatefulBuilder(
+            builder: (ctx, setModalState) {
+              return FadeTransition(
+                opacity: animation,
+                child: Scaffold(
+                  backgroundColor: Colors.black,
+                  appBar: AppBar(
+                    backgroundColor: Colors.black,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    title: _images.length > 1
+                        ? Text(
+                            '${currentFullIdx + 1} / ${_images.length}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                            ),
+                          )
+                        : null,
+                    leading: IconButton(
+                      icon: const Icon(
+                        Icons.close,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                      onPressed: () => Navigator.of(pageContext).pop(),
+                    ),
+                  ),
+                  body: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      ScrollConfiguration(
+                        behavior: ScrollConfiguration.of(ctx).copyWith(
+                          dragDevices: PointerDeviceKind.values.toSet(),
+                        ),
+                        child: PageView.builder(
+                          controller: fullCtrl,
+                          itemCount: _images.length,
+                          onPageChanged: (idx) {
+                            setModalState(() {
+                              currentFullIdx = idx;
+                            });
+                          },
+                          itemBuilder: (_, idx) {
+                            final bytes = _images[idx] as Uint8List;
+                            return InteractiveViewer(
+                              panEnabled: true,
+                              minScale: 0.5,
+                              maxScale: 5.0,
+                              child: Center(
+                                child: Image.memory(
+                                  bytes,
+                                  fit: BoxFit.contain,
+                                  gaplessPlayback: true,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      if (_images.length > 1 && currentFullIdx > 0)
+                        Positioned(
+                          left: 16,
+                          child: IconButton(
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.white24,
+                            ),
+                            icon: const Icon(
+                              Icons.chevron_left,
+                              color: Colors.white,
+                              size: 32,
+                            ),
+                            onPressed: () {
+                              fullCtrl.previousPage(
+                                duration: const Duration(milliseconds: 250),
+                                curve: Curves.easeOut,
+                              );
+                            },
+                          ),
+                        ),
+                      if (_images.length > 1 &&
+                          currentFullIdx < _images.length - 1)
+                        Positioned(
+                          right: 16,
+                          child: IconButton(
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.white24,
+                            ),
+                            icon: const Icon(
+                              Icons.chevron_right,
+                              color: Colors.white,
+                              size: 32,
+                            ),
+                            onPressed: () {
+                              fullCtrl.nextPage(
+                                duration: const Duration(milliseconds: 250),
+                                curve: Curves.easeOut,
+                              );
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_images.isEmpty) return const SizedBox.shrink();
+    final int total = _images.length;
+    final int safeIndex = _currentIndex >= total ? 0 : _currentIndex;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 500),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 240,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade900,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.grey.shade300),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(context)
+                      .copyWith(dragDevices: PointerDeviceKind.values.toSet()),
+                  child: PageView.builder(
+                    controller: _pageController,
+                    itemCount: total,
+                    onPageChanged: (idx) {
+                      setState(() {
+                        _currentIndex = idx;
+                      });
+                    },
+                    itemBuilder: (context, idx) {
+                      final bytes = _images[idx] as Uint8List;
+                      return GestureDetector(
+                        onTap: () => _openFullScreenGallery(idx),
+                        child: Image.memory(
+                          bytes,
+                          key: ValueKey('${_prefix}_$idx'),
+                          width: double.infinity,
+                          height: 240,
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                          filterQuality: FilterQuality.medium,
+                          errorBuilder: (context, error, stackTrace) {
+                            return const Center(
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Colors.white54,
+                                size: 36,
+                              ),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                if (total > 1)
+                  Positioned(
+                    top: 10,
+                    right: 10,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '${safeIndex + 1} / $total',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (total > 1 && safeIndex > 0)
+                  Positioned(
+                    left: 8,
+                    child: InkWell(
+                      onTap: () {
+                        _pageController.previousPage(
+                          duration: const Duration(milliseconds: 250),
+                          curve: Curves.easeOut,
+                        );
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.chevron_left,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (total > 1 && safeIndex < total - 1)
+                  Positioned(
+                    right: 8,
+                    child: InkWell(
+                      onTap: () {
+                        _pageController.nextPage(
+                          duration: const Duration(milliseconds: 250),
+                          curve: Curves.easeOut,
+                        );
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.chevron_right,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (total > 1)
+            Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(total, (idx) {
+                  final isSelected = idx == safeIndex;
+                  return AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    width: isSelected ? 16 : 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: isSelected ? Colors.blue : Colors.grey.shade400,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  );
+                }),
+              ),
+            ),
+        ],
       ),
     );
   }
