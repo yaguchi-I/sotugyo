@@ -850,6 +850,7 @@ class _SnsAddScreenState extends State {
           ),
         ),
       ),
+    ),
     );
   }
 }
