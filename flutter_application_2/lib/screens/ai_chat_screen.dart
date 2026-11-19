@@ -6,8 +6,14 @@ import 'package:image_picker/image_picker.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import '../services/ai_knowledge_service.dart';
+import 'sns_detail_screen.dart';
+
 class AiChatScreen extends StatefulWidget {
-  const AiChatScreen({super.key});
+  final String? initialPrompt;
+  final Map? referencedPost;
+
+  const AiChatScreen({super.key, this.initialPrompt, this.referencedPost});
 
   static const String apiKey = '';
 
@@ -24,10 +30,14 @@ class AiChatScreen extends StatefulWidget {
 }
 
 class _AiChatScreenState extends State {
+  String? get _initialPrompt => (widget as AiChatScreen).initialPrompt;
+  Map? get _referencedPost => (widget as AiChatScreen).referencedPost;
+
   final String _currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
 
   bool _isCheckingSetup = true;
   bool _isSetupComplete = false;
+  bool _hasTriggeredInitialPrompt = false;
 
   final TextEditingController _areaController = TextEditingController();
   final List _cookingAppliances = [
@@ -40,25 +50,26 @@ class _AiChatScreenState extends State {
     '冷蔵庫',
   ];
   final List _missingAppliances = [];
+  final List _blockedUsers = [];
   String _userArea = '';
   String _userName = 'あなた';
   String _activeModelName = AiChatScreen.fallbackModels.first.toString();
 
   final List _quickPrompts = [
     {
+      'label': '🍲 鍋で作れる安い料理',
+      'prompt': '鍋で作れるあまり高くないおすすめの料理はある？みんなの投稿も参考にして教えて！',
+    },
+    {
       'label': '🍳 150円以下のスピード飯',
-      'prompt': '150円以下で10分以内に作れる、洗い物が少ない節約レシピを1つ教えて！',
+      'prompt': '150円以下で10分以内に作れる、洗い物が少ない節約レシピを教えて！',
     },
     {'label': '🥬 冷蔵庫の余り物で1品', 'prompt': '一人暮らしの冷蔵庫に余りがちな食材を使った簡単おかずのレシピを教えて！'},
-    {
-      'label': '💡 今月の光熱費を削る裏技',
-      'prompt': '今の季節にすぐ実践できる、電気代・ガス代・水道代の効果的な節約術を教えて！',
-    },
+    {'label': '💡 光熱費を削る裏技', 'prompt': '今の季節にすぐ実践できる、電気代・ガス代・水道代の効果的な節約術を教えて！'},
     {
       'label': '🧹 100均グッズで時短掃除',
       'prompt': 'キッチンやお風呂の汚れを、家にあるものや100均アイテムで簡単に落とす掃除術を教えて！',
     },
-    {'label': '🧺 部屋干しの生乾き対策', 'prompt': '一人暮らしの部屋干しで洗濯物が臭くならない・早く乾くコツを教えて！'},
   ];
 
   GenerativeModel? _model;
@@ -68,9 +79,10 @@ class _AiChatScreenState extends State {
   final ScrollController _scrollController = ScrollController();
   final List _messages = [];
   final List _chatHistorySessions = [];
-  final Set _savedMessageIndexes = {};
+  final Set _savedMessageIndexes = Set();
   String _currentSessionId = '';
   bool _isLoading = false;
+  String _loadingStatus = 'AIが回答を考えています...';
   Uint8List? _selectedImageBytes;
 
   @override
@@ -78,6 +90,18 @@ class _AiChatScreenState extends State {
     super.initState();
     _currentSessionId = 'session_${DateTime.now().millisecondsSinceEpoch}';
     _checkInitialSetup();
+  }
+
+  List _toMapList(dynamic rawList) {
+    final List result = [];
+    if (rawList is List) {
+      for (final item in rawList) {
+        if (item is Map) {
+          result.add(Map.from(item));
+        }
+      }
+    }
+    return result;
   }
 
   String _getSeason(int month) {
@@ -97,7 +121,7 @@ class _AiChatScreenState extends State {
   }
 
   bool _isCookingQuery(String text) {
-    final List cookingKeywords = [
+    const List cookingKeywords = [
       'レシピ',
       '料理',
       '作り方',
@@ -124,8 +148,12 @@ class _AiChatScreenState extends State {
       'スープ',
       '味噌汁',
       'おつまみ',
+      '鍋',
+      'キャベツ',
+      '豚肉',
+      '鶏肉',
     ];
-    final List nonCookingKeywords = [
+    const List nonCookingKeywords = [
       '掃除',
       '洗濯',
       '光熱費',
@@ -165,15 +193,18 @@ class _AiChatScreenState extends State {
         : _missingAppliances.join('、');
     final areaText = _userArea.isEmpty ? '日本' : _userArea;
 
-    return 'あなたは一人暮らしをサポートする親しみやすいAIライフアドバイザーです。\n'
+    return 'あなたは一人暮らし向けSNSアプリ専属の超優秀なAIライフアドバイザーです。\n'
         'ユーザー名：$_userName\n'
         '現在：${now.year}年${now.month}月${now.day}日（季節：$season）\n'
         '居住地域：$areaText\n'
         '持っていない調理家電：$missingText\n\n'
-        '【最重要ルール：質問の内容によって回答形式を明確に使い分けること】\n'
+        '【コミュニティ連携の最優先ルール】\n'
+        '・プロンプト内に「【アプリ内のみんなの実体験投稿】」が渡された場合、その中から相談に最も役立つ投稿を積極的に引用し、「アプリ内では〇〇さんの『△△』という投稿も好評ですよ！」のように自然に紹介してください。\n'
+        '・通常のつぶやき投稿（例：春キャベツの肉巻きが美味しかった等）であっても、ユーザーの条件（例：鍋で作る）に合わせて「鍋でロールキャベツ風に煮込むと美味しいですよ」のように具体的にアレンジ提案してください。\n'
+        '・参考にした投稿がある場合は、回答のいちばん最後の行だけに [REF:docId1,docId2] の形式で該当のdocIdをカンマ区切りで出力してください（最大3件）。参考にした投稿がなければ [REF:] は書かないでください。\n\n'
+        '【回答フォーマットのルール】\n'
         '1. 掃除・洗濯・光熱費節約・収納・生活の悩み・雑談など「料理のレシピ以外」の質問の場合：\n'
-        '   ・レシピ形式（【料理名】【材料】【作り方】などの見出し）は絶対に使わないでください。\n'
-        '   ・普通の自然な会話文や、読みやすい箇条書きで親身にわかりやすく答えてください。\n'
+        '   ・レシピ形式（【料理名】【材料】【作り方】）は絶対に使わず、読みやすい自然な文章や箇条書きで答えてください。\n'
         '2. ユーザーが明確に「料理のレシピ・献立・食べ物の作り方」を求めた場合のみ：\n'
         '   ・持っていない調理家電（$missingText）を一切使わないレシピを考案し、以下の見出しを使って1人分の分量で回答してください。\n'
         '   【料理名】〇〇\n'
@@ -194,36 +225,53 @@ class _AiChatScreenState extends State {
     final targetModel = modelName ?? _activeModelName;
     _activeModelName = targetModel;
 
-    final List historyContents = [];
-    for (final rawMsg in _messages) {
-      final msg = rawMsg as Map;
-      final role = msg['role']?.toString() ?? '';
-      final text = msg['text']?.toString() ?? '';
-      if (text.isEmpty) continue;
-      if (role == 'user') {
-        historyContents.add(Content.text(text));
-      } else if (role == 'ai') {
-        historyContents.add(Content.model([TextPart(text)]));
-      }
-    }
-
     _model = GenerativeModel(
       model: targetModel,
       apiKey: currentKey,
       systemInstruction: Content.system(_buildSystemPrompt()),
     );
-    _chatSession = _model!.startChat(history: historyContents.cast());
+    _chatSession = _model!.startChat(
+      history: [
+        for (final rawMsg in _messages)
+          if (rawMsg is Map &&
+              (rawMsg['text']?.toString() ?? '').isNotEmpty &&
+              rawMsg['role']?.toString() == 'user')
+            Content.text(rawMsg['text'].toString())
+          else if (rawMsg is Map &&
+              (rawMsg['text']?.toString() ?? '').isNotEmpty &&
+              rawMsg['role']?.toString() == 'ai')
+            Content.model([TextPart(rawMsg['text'].toString())]),
+      ],
+    );
   }
 
   List _serializeMessages(List sourceMessages) {
-    return sourceMessages.map((rawMsg) {
-      final m = rawMsg as Map;
-      return {
-        'role': m['role']?.toString() ?? 'ai',
-        'text': m['text']?.toString() ?? '',
-        'time': m['time']?.toString() ?? '',
-      };
-    }).toList();
+    final List result = [];
+    for (final rawMsg in sourceMessages) {
+      if (rawMsg is! Map) continue;
+      final List refs = [];
+      for (final rawRef in _toMapList(rawMsg['referencedPosts'])) {
+        final r = rawRef as Map;
+        refs.add({
+          'docId': (r['docId'] ?? '').toString(),
+          'userName': (r['userName'] ?? '名無し').toString(),
+          'title': (r['title'] ?? '').toString(),
+          'content': (r['content'] ?? '').toString(),
+          'recipeCost': (r['recipeCost'] ?? '').toString(),
+          'helpfuls': AiKnowledgeService.readIntField(r['helpfuls']),
+          'saves': AiKnowledgeService.readIntField(r['saves']),
+          'likes': AiKnowledgeService.readIntField(r['likes']),
+          'mainCategory': (r['mainCategory'] ?? '').toString(),
+        });
+      }
+      result.add({
+        'role': rawMsg['role']?.toString() ?? 'ai',
+        'text': rawMsg['text']?.toString() ?? '',
+        'time': rawMsg['time']?.toString() ?? '',
+        'referencedPosts': refs,
+      });
+    }
+    return result;
   }
 
   Future _persistChatLogs() async {
@@ -231,7 +279,7 @@ class _AiChatScreenState extends State {
 
     final serializedCurrent = _serializeMessages(_messages);
     final userMessages = serializedCurrent
-        .where((m) => (m as Map)['role'] == 'user')
+        .where((m) => m is Map && m['role'] == 'user')
         .toList();
 
     if (userMessages.isNotEmpty) {
@@ -241,7 +289,7 @@ class _AiChatScreenState extends State {
           ? '${firstUserText.substring(0, 20)}...'
           : firstUserText;
 
-      final sessionData = {
+      final Map sessionData = {
         'id': _currentSessionId,
         'title': sessionTitle,
         'updatedAt': _formatNowTime(),
@@ -249,7 +297,7 @@ class _AiChatScreenState extends State {
       };
 
       final existingIdx = _chatHistorySessions.indexWhere(
-        (s) => (s as Map)['id'] == _currentSessionId,
+        (s) => s is Map && s['id'] == _currentSessionId,
       );
       if (existingIdx != -1) {
         _chatHistorySessions[existingIdx] = sessionData;
@@ -271,9 +319,7 @@ class _AiChatScreenState extends State {
             'currentChatMessages': serializedCurrent,
             'chatHistoryLogs': _chatHistorySessions,
           }, SetOptions(merge: true));
-    } catch (e) {
-      debugPrint('[AI相談ログ] Firestore保存エラー: $e');
-    }
+    } catch (e) {}
   }
 
   Future _checkInitialSetup() async {
@@ -283,6 +329,7 @@ class _AiChatScreenState extends State {
         _isSetupComplete = true;
       });
       _initAiSession();
+      _maybeRunInitialPrompt();
       return;
     }
 
@@ -298,16 +345,22 @@ class _AiChatScreenState extends State {
         final data = doc.data()!;
         final bool setupDone = data['isAiSetupDone'] == true;
         final String savedArea = data['area']?.toString() ?? '';
-        final String savedName = data['name']?.toString() ?? 'あなた';
-        final List savedMissing = data['missingAppliances'] != null
+        final String savedName =
+            (data['userName']?.toString().isNotEmpty == true
+                    ? data['userName']
+                    : data['name'])
+                ?.toString() ??
+            'あなた';
+        final List savedMissing = data['missingAppliances'] is List
             ? List.from(data['missingAppliances'])
+                  .map((e) => e.toString())
+                  .toList()
             : [];
-        final List loadedSessions = data['chatHistoryLogs'] != null
-            ? List.from(data['chatHistoryLogs'])
+        final List savedBlocked = data['blockedUsers'] is List
+            ? List.from(data['blockedUsers']).map((e) => e.toString()).toList()
             : [];
-        final List loadedCurrentMsgs = data['currentChatMessages'] != null
-            ? List.from(data['currentChatMessages'])
-            : [];
+        final List loadedSessions = _toMapList(data['chatHistoryLogs']);
+        final List loadedCurrentMsgs = _toMapList(data['currentChatMessages']);
         final String savedSessionId =
             data['currentSessionId']?.toString() ?? '';
 
@@ -318,16 +371,19 @@ class _AiChatScreenState extends State {
           _missingAppliances
             ..clear()
             ..addAll(savedMissing);
+          _blockedUsers
+            ..clear()
+            ..addAll(savedBlocked);
           _chatHistorySessions
             ..clear()
             ..addAll(loadedSessions);
-          if (savedSessionId.isNotEmpty) {
+          if (_initialPrompt == null && savedSessionId.isNotEmpty) {
             _currentSessionId = savedSessionId;
           }
-          if (loadedCurrentMsgs.isNotEmpty) {
+          if (_initialPrompt == null && loadedCurrentMsgs.isNotEmpty) {
             _messages
               ..clear()
-              ..addAll(loadedCurrentMsgs.map((e) => Map.from(e as Map)));
+              ..addAll(loadedCurrentMsgs);
           }
           _isSetupComplete = setupDone;
           _isCheckingSetup = false;
@@ -339,12 +395,14 @@ class _AiChatScreenState extends State {
               _messages.add({
                 'role': 'ai',
                 'text':
-                    'こんにちは、$_userNameさん！\n料理のレシピから、掃除・洗濯・光熱費の節約術、ちょっとした日常の疑問まで何でも気軽に聞いてくださいね。',
+                    'こんにちは、$_userNameさん！\nみんなの投稿（レシピや節約・掃除の知恵）も検索しながら、あなたの環境に合わせて提案します。何でも気軽に相談してくださいね！',
                 'time': _formatNowTime(),
+                'referencedPosts': [],
               });
             });
           }
           _initAiSession();
+          _maybeRunInitialPrompt();
         }
       } else {
         setState(() {
@@ -359,6 +417,20 @@ class _AiChatScreenState extends State {
         _isSetupComplete = true;
       });
       _initAiSession();
+      _maybeRunInitialPrompt();
+    }
+  }
+
+  void _maybeRunInitialPrompt() {
+    if (_hasTriggeredInitialPrompt) return;
+    final initial = _initialPrompt?.trim() ?? '';
+    if (initial.isNotEmpty) {
+      _hasTriggeredInitialPrompt = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _sendMessage(initial, _referencedPost);
+        }
+      });
     }
   }
 
@@ -370,8 +442,9 @@ class _AiChatScreenState extends State {
         ..clear()
         ..add({
           'role': 'ai',
-          'text': '新しい相談スレッドを開始しました！\n料理・掃除・節約・暮らしの疑問など、何でも話しかけてください。',
+          'text': '新しい相談スレッドを開始しました！\n料理・掃除・節約・暮らしの疑問など、みんなの投稿も探しながらお答えします。',
           'time': _formatNowTime(),
+          'referencedPosts': [],
         });
     });
     _initAiSession();
@@ -380,7 +453,7 @@ class _AiChatScreenState extends State {
 
   Future _deleteHistorySession(String sessionId) async {
     setState(() {
-      _chatHistorySessions.removeWhere((s) => (s as Map)['id'] == sessionId);
+      _chatHistorySessions.removeWhere((s) => s is Map && s['id'] == sessionId);
     });
     if (_currentSessionId == sessionId) {
       _startNewChatSession();
@@ -461,17 +534,16 @@ class _AiChatScreenState extends State {
                               separatorBuilder: (_, __) =>
                                   const SizedBox(height: 8),
                               itemBuilder: (_, idx) {
-                                final session = Map.from(
-                                  _chatHistorySessions[idx] as Map,
-                                );
+                                final session =
+                                    _chatHistorySessions[idx] as Map;
                                 final String sId =
                                     session['id']?.toString() ?? '';
                                 final String sTitle =
                                     session['title']?.toString() ?? '相談ログ';
                                 final String sTime =
                                     session['updatedAt']?.toString() ?? '';
-                                final List sMsgs = List.from(
-                                  session['messages'] ?? [],
+                                final List sMsgs = _toMapList(
+                                  session['messages'],
                                 );
                                 final bool isCurrent = sId == _currentSessionId;
 
@@ -539,14 +611,8 @@ class _AiChatScreenState extends State {
                                           crossAxisAlignment:
                                               CrossAxisAlignment.start,
                                           children: [
-                                            ...sMsgs.map((rawM) {
-                                              final m = rawM as Map;
-                                              final isU = m['role'] == 'user';
-                                              final txt =
-                                                  m['text']?.toString() ?? '';
-                                              final tm =
-                                                  m['time']?.toString() ?? '';
-                                              return Padding(
+                                            for (final rawM in sMsgs)
+                                              Padding(
                                                 padding:
                                                     const EdgeInsets.symmetric(
                                                       vertical: 4.0,
@@ -556,12 +622,17 @@ class _AiChatScreenState extends State {
                                                       CrossAxisAlignment.start,
                                                   children: [
                                                     Text(
-                                                      isU ? 'あなた: ' : 'AI: ',
+                                                      (rawM as Map)['role'] ==
+                                                              'user'
+                                                          ? 'あなた: '
+                                                          : 'AI: ',
                                                       style: TextStyle(
                                                         fontWeight:
                                                             FontWeight.bold,
                                                         fontSize: 13,
-                                                        color: isU
+                                                        color:
+                                                            rawM['role'] ==
+                                                                'user'
                                                             ? Colors
                                                                   .blue
                                                                   .shade800
@@ -570,7 +641,9 @@ class _AiChatScreenState extends State {
                                                     ),
                                                     Expanded(
                                                       child: Text(
-                                                        txt,
+                                                        rawM['text']
+                                                                ?.toString() ??
+                                                            '',
                                                         maxLines: 3,
                                                         overflow: TextOverflow
                                                             .ellipsis,
@@ -579,14 +652,18 @@ class _AiChatScreenState extends State {
                                                         ),
                                                       ),
                                                     ),
-                                                    if (tm.isNotEmpty)
+                                                    if ((rawM['time']
+                                                                ?.toString() ??
+                                                            '')
+                                                        .isNotEmpty)
                                                       Padding(
                                                         padding:
                                                             const EdgeInsets.only(
                                                               left: 6,
                                                             ),
                                                         child: Text(
-                                                          tm,
+                                                          rawM['time']
+                                                              .toString(),
                                                           style:
                                                               const TextStyle(
                                                                 fontSize: 10,
@@ -597,8 +674,7 @@ class _AiChatScreenState extends State {
                                                       ),
                                                   ],
                                                 ),
-                                              );
-                                            }),
+                                              ),
                                             const SizedBox(height: 8),
                                             Align(
                                               alignment: Alignment.centerRight,
@@ -610,13 +686,7 @@ class _AiChatScreenState extends State {
                                                         .clear();
                                                     _messages
                                                       ..clear()
-                                                      ..addAll(
-                                                        sMsgs.map(
-                                                          (e) => Map.from(
-                                                            e as Map,
-                                                          ),
-                                                        ),
-                                                      );
+                                                      ..addAll(sMsgs);
                                                   });
                                                   _initAiSession();
                                                   Navigator.pop(sheetContext);
@@ -688,13 +758,15 @@ class _AiChatScreenState extends State {
         _messages.add({
           'role': 'ai',
           'text':
-              '設定ありがとうございます！\n地域（$_userArea）や家電状況に合わせてサポートしますね。掃除や節約の相談も、普通の会話形式でわかりやすくお答えします！',
+              '設定ありがとうございます！\n地域（$_userArea）や家電状況、さらにアプリ内のみんなの実体験投稿も検索しながらサポートしますね！',
           'time': _formatNowTime(),
+          'referencedPosts': [],
         });
       }
     });
     _initAiSession();
     _persistChatLogs();
+    _maybeRunInitialPrompt();
   }
 
   Future _pickImage(ImageSource source) async {
@@ -729,7 +801,85 @@ class _AiChatScreenState extends State {
     });
   }
 
-  Future _sendMessage([String? presetText]) async {
+  String _formatCommunityPostsForPrompt(List posts) {
+    if (posts.isEmpty) return '';
+    final buffer = StringBuffer();
+    buffer.writeln('\n【アプリ内のみんなの実体験投稿（優先度順）】');
+    for (int i = 0; i < posts.length; i++) {
+      final p = posts[i] as Map;
+      final docId = (p['docId'] ?? '').toString();
+      final userName = (p['userName'] ?? '名無し').toString();
+      final title = (p['title'] ?? '').toString();
+      final content = (p['content'] ?? '').toString();
+      final cost = (p['recipeCost'] ?? '').toString();
+      final priceTier = (p['priceTier'] ?? 'none').toString();
+      final helpfuls = p['helpfuls'] ?? 0;
+      final saves = p['saves'] ?? 0;
+      final likes = p['likes'] ?? 0;
+      final ingItems = _toMapList(p['recipeIngredients']);
+      final ings = ingItems
+          .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}'.trim())
+          .join('、');
+      buffer.writeln(
+        '${i + 1}. [docId:$docId] 投稿者:$userName / カテゴリ:${p['mainCategory']}(${p['subCategory']}) / 評価:保存$saves・参考になった$helpfuls・いいね$likes / 価格帯:$priceTier ${cost.isNotEmpty ? "($cost)" : ""}',
+      );
+      if (title.isNotEmpty) buffer.writeln('   タイトル: $title');
+      if (content.isNotEmpty) buffer.writeln('   本文: $content');
+      if (ings.isNotEmpty) buffer.writeln('   材料: $ings');
+      final steps = (p['recipeSteps'] ?? '').toString();
+      if (steps.isNotEmpty) buffer.writeln('   手順: $steps');
+    }
+    return buffer.toString();
+  }
+
+  Map _extractReferenceTag(String rawReply, List candidatePosts) {
+    final regex = RegExp(r'\[REF:([^\]]*)\]');
+    final match = regex.firstMatch(rawReply);
+    final List selectedRefs = [];
+
+    if (match != null) {
+      final idString = match.group(1) ?? '';
+      final ids = idString
+          .split(',')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      for (final id in ids) {
+        for (final rawP in candidatePosts) {
+          final p = rawP as Map;
+          if (p['docId'] == id &&
+              !selectedRefs.any((r) => (r as Map)['docId'] == id)) {
+            selectedRefs.add(p);
+          }
+        }
+      }
+    }
+
+    final cleanText = rawReply
+        .replaceAll(regex, '')
+        .replaceAll('**', '')
+        .replaceAll('##', '')
+        .trim();
+
+    if (selectedRefs.isEmpty && candidatePosts.isNotEmpty) {
+      for (final rawP in candidatePosts.take(2)) {
+        final p = rawP as Map;
+        final double rScore = (p['rankScore'] is num)
+            ? (p['rankScore'] as num).toDouble()
+            : 0.0;
+        if (rScore >= 25.0) {
+          selectedRefs.add(p);
+        }
+      }
+    }
+
+    return {
+      'cleanText': cleanText,
+      'referencedPosts': selectedRefs.take(3).toList(),
+    };
+  }
+
+  Future _sendMessage([String? presetText, Map? explicitContextPost]) async {
     final rawText = presetText ?? _textController.text.trim();
     final Uint8List? imageBytes = _selectedImageBytes;
 
@@ -741,8 +891,9 @@ class _AiChatScreenState extends State {
       setState(() {
         _messages.add({
           'role': 'ai',
-          'text': 'APIキーがまだ設定されていません。\nai_chat_screen.dart の12行目にある apiKey にキーを貼り付けて保存してください。',
+          'text': 'APIキーがまだ設定されていません。\nai_chat_screen.dart の20行目にある apiKey にキーを貼り付けて保存してください。',
           'time': _formatNowTime(),
+          'referencedPosts': [],
         });
       });
       _scrollToBottom();
@@ -757,21 +908,82 @@ class _AiChatScreenState extends State {
         'text': rawText.isEmpty ? '（画像を送信しました）' : rawText,
         'imageBytes': imageBytes,
         'time': sentTime,
+        'referencedPosts': [],
       });
       if (presetText == null) {
         _textController.clear();
       }
       _selectedImageBytes = null;
       _isLoading = true;
+      _loadingStatus = '🔍 相談内容を解析中...';
     });
     _scrollToBottom();
 
+    final List retrievedPosts = [];
+    if (explicitContextPost != null) {
+      retrievedPosts.add(explicitContextPost);
+    }
+
+    if (rawText.isNotEmpty) {
+      try {
+        final rawPlan = await AiKnowledgeService.extractSearchPlan(
+          userQuery: rawText,
+          missingAppliances: _missingAppliances,
+        );
+
+        if (rawPlan is Map && rawPlan['needsSearch'] == true) {
+          if (mounted) {
+            setState(() {
+              _loadingStatus = '📚 みんなの投稿から参考になる実体験を検索中...';
+            });
+          }
+
+          final rawFound =
+              await AiKnowledgeService.searchRelevantCommunityPosts(
+                searchTags: rawPlan['searchTags'] is List
+                    ? List.from(rawPlan['searchTags'])
+                    : const [],
+                category: (rawPlan['category'] ?? 'すべて').toString(),
+                preferredPriceTier: (rawPlan['preferredPriceTier'] ?? 'any')
+                    .toString(),
+                maxBudgetYen:
+                    int.tryParse('${rawPlan['maxBudgetYen'] ?? -1}') ?? -1,
+                missingAppliances: _missingAppliances,
+                currentUserId: _currentUserId,
+                blockedUsers: _blockedUsers,
+                topK: 5,
+              );
+
+          if (rawFound is List) {
+            for (final item in rawFound) {
+              if (item is Map &&
+                  !retrievedPosts.any(
+                    (e) => (e as Map)['docId'] == item['docId'],
+                  )) {
+                retrievedPosts.add(item);
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        _loadingStatus = retrievedPosts.isNotEmpty
+            ? '✨ 見つかった${retrievedPosts.length}件の投稿とあなたの環境を元に回答を作成中...'
+            : '✨ あなたの環境に合わせて回答を作成中...';
+      });
+    }
+
     final bool wantsRecipe = _isCookingQuery(rawText);
-    debugPrint('[AI相談ログ] ユーザー入力: "$rawText" | レシピ判定: $wantsRecipe');
+    final String communityContext = _formatCommunityPostsForPrompt(
+      retrievedPosts,
+    );
 
     final String wrappedPrompt = wantsRecipe
-        ? '$rawText\n（※料理・レシピの相談なので、【料理名】【目安時間・費用】【材料】【作り方】の形式で1人分の分量を具体的に回答してください。持っていない家電は使わないでください。）'
-        : '$rawText\n（※これは料理のレシピ相談ではありません。【料理名】や【材料】【作り方】などのレシピ用フォーマットは絶対に使わず、相談内容に合った自然な文章やアドバイス形式で回答してください。）';
+        ? '$rawText\n$communityContext\n（※料理・レシピの相談なので、【料理名】【目安時間・費用】【材料】【作り方】の形式で1人分の分量を具体的に回答してください。持っていない家電は使わないでください。アプリ内投稿が役立つ場合は自然に紹介し、最後に [REF:docId] を付けてください。）'
+        : '$rawText\n$communityContext\n（※これは料理のレシピ相談ではありません。【料理名】や【材料】【作り方】などのレシピ用フォーマットは絶対に使わず、相談内容に合った自然な文章やアドバイス形式で回答してください。アプリ内投稿が役立つ場合は自然に紹介し、最後に [REF:docId] を付けてください。）';
 
     String? aiReply;
     Object? lastError;
@@ -779,9 +991,6 @@ class _AiChatScreenState extends State {
     for (final candidateItem in AiChatScreen.fallbackModels) {
       final candidateModel = candidateItem.toString();
       try {
-        final sw = Stopwatch()..start();
-        debugPrint('[AI相談ログ] モデル試行中: $candidateModel');
-
         if (_chatSession == null || _activeModelName != candidateModel) {
           _initAiSession(candidateModel);
         }
@@ -805,20 +1014,12 @@ class _AiChatScreenState extends State {
               .timeout(const Duration(seconds: 25));
         }
 
-        sw.stop();
         if (response.text != null && response.text!.trim().isNotEmpty) {
-          aiReply = response.text!
-              .replaceAll('**', '')
-              .replaceAll('##', '')
-              .trim();
-          debugPrint(
-            '[AI相談ログ] 応答成功 ($candidateModel / ${sw.elapsedMilliseconds}ms)',
-          );
+          aiReply = response.text!.trim();
           break;
         }
       } catch (e) {
         lastError = e;
-        debugPrint('[AI相談ログ] モデル失敗 ($candidateModel): $e');
         _chatSession = null;
       }
     }
@@ -828,16 +1029,19 @@ class _AiChatScreenState extends State {
     setState(() {
       _isLoading = false;
       if (aiReply != null) {
+        final extracted = _extractReferenceTag(aiReply, retrievedPosts);
         _messages.add({
           'role': 'ai',
-          'text': aiReply,
+          'text': (extracted['cleanText'] ?? '').toString(),
           'time': _formatNowTime(),
+          'referencedPosts': extracted['referencedPosts'],
         });
       } else {
         _messages.add({
           'role': 'ai',
           'text': '通信が混み合っているか回数制限に達しました。少し待ってからもう一度お試しください。\n($lastError)',
           'time': _formatNowTime(),
+          'referencedPosts': [],
         });
       }
     });
@@ -971,6 +1175,9 @@ class _AiChatScreenState extends State {
         'replies': 0,
         'likes': 0,
         'helpfuls': 0,
+        'saves': 1,
+        'impressions': 0,
+        'valueScore': 0.0,
         'likedUsers': [],
         'helpfulUsers': [],
         'savedUsers': [_currentUserId],
@@ -997,6 +1204,137 @@ class _AiChatScreenState extends State {
     }
   }
 
+  Widget _buildReferencedPostCard(Map post) {
+    final String docId = (post['docId'] ?? '').toString();
+    if (docId.isEmpty) return const SizedBox.shrink();
+
+    final String userName = (post['userName'] ?? '名無し').toString();
+    final String title = (post['title'] ?? '').toString();
+    final String content = (post['content'] ?? '').toString();
+    final String cost = (post['recipeCost'] ?? '').toString();
+    final int helpfuls = AiKnowledgeService.readIntField(post['helpfuls']);
+    final int saves = AiKnowledgeService.readIntField(post['saves']);
+    final String previewText = title.isNotEmpty ? title : content;
+
+    return InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => SnsDetailScreen(postId: docId)),
+        );
+      },
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.blue.shade50,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.blue.shade200),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(
+                Icons.forum_outlined,
+                size: 18,
+                color: Colors.blue,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        '$userName さんの投稿',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue.shade900,
+                        ),
+                      ),
+                      if (cost.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          cost,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    previewText,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Colors.black87,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.lightbulb_outline,
+                        size: 13,
+                        color: Colors.orange,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        '$helpfuls',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black54,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Icon(
+                        Icons.bookmark_border,
+                        size: 13,
+                        color: Colors.blue,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        '$saves',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black54,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '詳細を見る ›',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.blue.shade700,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _areaController.dispose();
@@ -1015,12 +1353,19 @@ class _AiChatScreenState extends State {
       return _buildSetupView();
     }
 
+    final bool canPop = Navigator.of(context).canPop();
+
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.menu),
-          onPressed: () => Scaffold.of(context).openDrawer(),
-        ),
+        leading: canPop
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : IconButton(
+                icon: const Icon(Icons.menu),
+                onPressed: () => Scaffold.of(context).openDrawer(),
+              ),
         title: const Text(
           'AI 暮らしの相談室',
           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
@@ -1056,19 +1401,24 @@ class _AiChatScreenState extends State {
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
-                children: _quickPrompts.map((rawItem) {
-                  final item = rawItem as Map;
-                  final label = item['label'].toString();
-                  final prompt = item['prompt'].toString();
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8.0),
-                    child: ActionChip(
-                      backgroundColor: Colors.white,
-                      label: Text(label, style: const TextStyle(fontSize: 12)),
-                      onPressed: _isLoading ? null : () => _sendMessage(prompt),
+                children: [
+                  for (final rawItem in _quickPrompts)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8.0),
+                      child: ActionChip(
+                        backgroundColor: Colors.white,
+                        label: Text(
+                          ((rawItem as Map)['label'] ?? '').toString(),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        onPressed: _isLoading
+                            ? null
+                            : () => _sendMessage(
+                                (rawItem['prompt'] ?? '').toString(),
+                              ),
+                      ),
                     ),
-                  );
-                }).toList(),
+                ],
               ),
             ),
           ),
@@ -1079,19 +1429,24 @@ class _AiChatScreenState extends State {
               itemCount: _messages.length + (_isLoading ? 1 : 0),
               itemBuilder: (context, index) {
                 if (index == _messages.length) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 12.0),
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12.0),
                     child: Row(
                       children: [
-                        SizedBox(
+                        const SizedBox(
                           width: 20,
                           height: 20,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
-                        SizedBox(width: 12),
-                        Text(
-                          'AIが回答を考えています...',
-                          style: TextStyle(color: Colors.grey),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _loadingStatus,
+                            style: const TextStyle(
+                              color: Colors.black54,
+                              fontSize: 13,
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -1102,7 +1457,10 @@ class _AiChatScreenState extends State {
                 final isUser = msg['role'] == 'user';
                 final text = msg['text']?.toString() ?? '';
                 final timeStr = msg['time']?.toString() ?? '';
-                final Uint8List? imageBytes = msg['imageBytes'] as Uint8List?;
+                final Uint8List? imageBytes = msg['imageBytes'] is Uint8List
+                    ? msg['imageBytes'] as Uint8List
+                    : null;
+                final List referencedPosts = _toMapList(msg['referencedPosts']);
                 final bool isSaved = _savedMessageIndexes.contains(index);
 
                 return Align(
@@ -1112,7 +1470,7 @@ class _AiChatScreenState extends State {
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 12),
                     constraints: BoxConstraints(
-                      maxWidth: MediaQuery.of(context).size.width * 0.82,
+                      maxWidth: MediaQuery.of(context).size.width * 0.86,
                     ),
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
@@ -1151,6 +1509,19 @@ class _AiChatScreenState extends State {
                             height: 1.5,
                           ),
                         ),
+                        if (!isUser && referencedPosts.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            '📌 参考になったみんなの投稿',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue.shade800,
+                            ),
+                          ),
+                          for (final refPost in referencedPosts)
+                            _buildReferencedPostCard(refPost as Map),
+                        ],
                         if (timeStr.isNotEmpty)
                           Padding(
                             padding: const EdgeInsets.only(top: 6.0),
@@ -1241,7 +1612,7 @@ class _AiChatScreenState extends State {
           SafeArea(
             top: false,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(8, 8, 8, 96),
+              padding: EdgeInsets.fromLTRB(8, 8, 8, canPop ? 12 : 96),
               decoration: BoxDecoration(
                 color: Colors.white,
                 border: Border(top: BorderSide(color: Colors.grey.shade300)),
@@ -1350,24 +1721,24 @@ class _AiChatScreenState extends State {
             Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: _cookingAppliances.map((rawApp) {
-                final app = rawApp.toString();
-                final isSelected = _missingAppliances.contains(app);
-                return FilterChip(
-                  label: Text(app),
-                  selected: isSelected,
-                  selectedColor: Colors.orange.shade100,
-                  onSelected: (selected) {
-                    setState(() {
-                      if (selected) {
-                        _missingAppliances.add(app);
-                      } else {
-                        _missingAppliances.remove(app);
-                      }
-                    });
-                  },
-                );
-              }).toList(),
+              children: [
+                for (final rawApp in _cookingAppliances)
+                  FilterChip(
+                    label: Text(rawApp.toString()),
+                    selected: _missingAppliances.contains(rawApp.toString()),
+                    selectedColor: Colors.orange.shade100,
+                    onSelected: (selected) {
+                      final app = rawApp.toString();
+                      setState(() {
+                        if (selected) {
+                          _missingAppliances.add(app);
+                        } else {
+                          _missingAppliances.remove(app);
+                        }
+                      });
+                    },
+                  ),
+              ],
             ),
             const SizedBox(height: 32),
             SizedBox(
