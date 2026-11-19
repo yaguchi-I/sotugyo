@@ -8,6 +8,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 
 import 'ai_chat_screen.dart';
 import 'sns_detail_screen.dart';
+import '../widgets/top_toast.dart';
 
 class SnsBookmarkScreen extends StatefulWidget {
   const SnsBookmarkScreen({super.key});
@@ -134,17 +135,12 @@ class _SnsBookmarkScreenState extends State
 
   Future _toggleSave(String docId) async {
     if (currentUserId.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
     try {
       await FirebaseFirestore.instance.collection('posts').doc(docId).update({
         'savedUsers': FieldValue.arrayRemove([currentUserId]),
       });
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('保存フォルダから解除しました'),
-          duration: Duration(seconds: 2),
-        ),
-      );
+      if (!mounted) return;
+      showReactionToast(context, 'savedUsers', added: false);
     } catch (e) {}
   }
 

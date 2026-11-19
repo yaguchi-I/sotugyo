@@ -13,7 +13,6 @@ import 'screens/sns_screen.dart';
 import 'screens/budget_screen.dart';
 import 'screens/ai_chat_screen.dart';
 import 'screens/sns_search_screen.dart';
-import 'screens/sns_add_screen.dart';
 import 'screens/sns_bookmark_screen.dart';
 import 'screens/cooking_screen.dart';
 
@@ -23,18 +22,63 @@ void main() async {
   runApp(const MyApp());
 }
 
+/// アプリ全体の配色。ここを変えるだけで全画面のテーマ色が変わる
+const Color kBrandColor = Color(0xFF2F80ED);
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
+  ThemeData _buildTheme() {
+    final scheme = ColorScheme.fromSeed(seedColor: kBrandColor);
+    return ThemeData(
+      colorScheme: scheme,
+      useMaterial3: true,
+      scaffoldBackgroundColor: const Color(0xFFF7F8FA),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 0,
+        scrolledUnderElevation: 1,
+        centerTitle: true,
+        titleTextStyle: TextStyle(
+          color: Colors.black87,
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      cardTheme: CardThemeData(
+        color: Colors.white,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: Colors.grey.shade200),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          minimumSize: const Size(64, 48),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      ),
+      snackBarTheme: const SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'アプリ',
+      title: 'ソロナンデス',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: _buildTheme(),
       home: StreamBuilder(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
@@ -53,6 +97,23 @@ class MyApp extends StatelessWidget {
   }
 }
 
+/// 画面1つ分の情報（アイコン・名前・説明）
+class _AppPage {
+  final Widget screen;
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  final String description;
+
+  const _AppPage({
+    required this.screen,
+    required this.icon,
+    required this.selectedIcon,
+    required this.label,
+    required this.description,
+  });
+}
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -60,20 +121,82 @@ class MainScreen extends StatefulWidget {
   State createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State {
-  int _currentIndex = 0;
-  bool _isSnsExpanded = false;
-  bool _isSaExpanded = false;
+class _MainScreenState extends State<MainScreen> {
+  // ---- 画面の番号（_pages の並び順と一致させる） ----
+  // ※投稿画面はタブではなく、タイムラインの右下ボタンから開く
+  static const int _home = 0;
+  static const int _search = 1;
+  static const int _budget = 2;
+  static const int _ai = 3;
+  static const int _bookmark = 4;
+  static const int _cooking = 5;
 
-  final List _screens = const [
-    SnsScreen(),
-    BudgetScreen(),
-    AiChatScreen(),
-    SnsSearchScreen(),
-    SnsAddScreen(),
-    SnsBookmarkScreen(),
-    CookingScreen(),
+  static const List<_AppPage> _pages = [
+    _AppPage(
+      screen: SnsScreen(),
+      icon: Icons.home_outlined,
+      selectedIcon: Icons.home,
+      label: 'ホーム',
+      description: 'みんなの節約術・裏技を見る',
+    ),
+    _AppPage(
+      screen: SnsSearchScreen(),
+      icon: Icons.search,
+      selectedIcon: Icons.search,
+      label: 'さがす',
+      description: 'キーワードやタグで投稿を探す',
+    ),
+    _AppPage(
+      screen: BudgetScreen(),
+      icon: Icons.account_balance_wallet_outlined,
+      selectedIcon: Icons.account_balance_wallet,
+      label: '家計簿',
+      description: '家計簿・支出の管理',
+    ),
+    _AppPage(
+      screen: AiChatScreen(),
+      icon: Icons.auto_awesome_outlined,
+      selectedIcon: Icons.auto_awesome,
+      label: 'AI相談',
+      description: '暮らしの悩みをAIに相談',
+    ),
+    _AppPage(
+      screen: SnsBookmarkScreen(),
+      icon: Icons.bookmark_border,
+      selectedIcon: Icons.bookmark,
+      label: '保存',
+      description: '保存した投稿・フォルダ',
+    ),
+    _AppPage(
+      screen: CookingScreen(),
+      icon: Icons.restaurant_menu_outlined,
+      selectedIcon: Icons.restaurant_menu,
+      label: 'AI自炊',
+      description: 'AIが冷蔵庫の中身からレシピ提案',
+    ),
   ];
+
+  /// 下のバーに常に出すタブ（ここに番号を足せばタブが増える）
+  static const List<int> _tabIndexes = [
+    _home,
+    _search,
+    _budget,
+    _cooking,
+    _ai,
+  ];
+
+  int _currentIndex = _home;
+
+  /// 一度開いた画面だけ作る（起動時に全画面の通信が走らないように）
+  final Set<int> _loadedIndexes = {_home};
+
+  void _goTo(int index) {
+    if (index == _currentIndex) return;
+    setState(() {
+      _currentIndex = index;
+      _loadedIndexes.add(index);
+    });
+  }
 
   Uint8List? _decodeIcon(String? base64String) {
     if (base64String == null || base64String.trim().isEmpty) return null;
@@ -110,306 +233,279 @@ class _MainScreenState extends State {
             ? userData['userName'].toString()
             : (currentUser?.displayName ?? 'マイページ');
         final email = currentUser?.email ?? '';
-        final birthday = userData['birthday']?.toString() ?? '';
         final iconBytes = _decodeIcon(userData['iconBase64']?.toString());
 
-        return Scaffold(
-          drawer: Drawer(
-            child: ListView(
-              padding: EdgeInsets.zero,
+        // Androidの戻るボタン：ホーム以外ならホームへ戻す
+        return PopScope(
+          canPop: _currentIndex == _home,
+          onPopInvokedWithResult: (didPop, result) {
+            if (!didPop) _goTo(_home);
+          },
+          child: Scaffold(
+            drawer: _buildDrawer(
+              userName: userName,
+              email: email,
+              iconBytes: iconBytes,
+              userData: userData,
+            ),
+            body: IndexedStack(
+              index: _currentIndex,
               children: [
-                DrawerHeader(
-                  decoration: const BoxDecoration(color: Colors.blue),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Row(
-                        children: [
-                          CircleAvatar(
-                            radius: 30,
-                            backgroundColor: Colors.white,
-                            backgroundImage: iconBytes != null
-                                ? MemoryImage(iconBytes)
-                                : null,
-                            child: iconBytes == null
-                                ? const Icon(
-                                    Icons.person,
-                                    size: 34,
-                                    color: Colors.blue,
-                                  )
-                                : null,
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  userName,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  email,
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                if (birthday.isNotEmpty) ...[
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '生年月日: $birthday',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.person_outline),
-                  title: const Text('アカウント・プロフィール編集'),
-                  subtitle: const Text('名前（15文字以内）・アイコン・興味タグ'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            AccountEditScreen(initialUserData: userData),
-                      ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.settings_outlined),
-                  title: const Text('地域・調理家電の設定'),
-                  subtitle: const Text('お住まいの地域・持っていない家電'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            AppSettingsScreen(initialUserData: userData),
-                      ),
-                    );
-                  },
-                ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.logout, color: Colors.red),
-                  title: const Text(
-                    'ログアウト',
-                    style: TextStyle(color: Colors.red),
-                  ),
-                  onTap: () async {
-                    await FirebaseAuth.instance.signOut();
-                  },
-                ),
+                for (int i = 0; i < _pages.length; i++)
+                  _loadedIndexes.contains(i)
+                      ? _pages[i].screen
+                      : const SizedBox.shrink(),
               ],
             ),
-          ),
-          body: Stack(
-            children: [
-              _screens[_currentIndex],
-              Positioned(
-                left: 16,
-                bottom: 30,
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _currentIndex = 0;
-                      _isSnsExpanded = !_isSnsExpanded;
-                      if (_isSnsExpanded) _isSaExpanded = false;
-                    });
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutQuart,
-                    height: 60,
-                    width: _isSnsExpanded ? 220 : 60,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: Colors.black87, width: 2),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black12,
-                          blurRadius: 4,
-                          offset: Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    clipBehavior: Clip.hardEdge,
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      physics: const NeverScrollableScrollPhysics(),
-                      child: SizedBox(
-                        width: 220,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.start,
-                          children: [
-                            const SizedBox(
-                              width: 56,
-                              child: Icon(
-                                Icons.forum_outlined,
-                                size: 28,
-                                color: Colors.black87,
-                              ),
-                            ),
-                            SizedBox(
-                              width: 160,
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceEvenly,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.search,
-                                      color: Colors.black87,
-                                    ),
-                                    onPressed: () =>
-                                        setState(() => _currentIndex = 3),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.add_box_outlined,
-                                      color: Colors.black87,
-                                    ),
-                                    onPressed: () =>
-                                        setState(() => _currentIndex = 4),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.bookmark_border,
-                                      color: Colors.black87,
-                                    ),
-                                    onPressed: () =>
-                                        setState(() => _currentIndex = 5),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                right: 16,
-                bottom: 30,
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _isSaExpanded = !_isSaExpanded;
-                      if (_isSaExpanded) _isSnsExpanded = false;
-                    });
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutQuart,
-                    height: 60,
-                    width: _isSaExpanded ? 220 : 60,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: Colors.black87, width: 2),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black12,
-                          blurRadius: 4,
-                          offset: Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    clipBehavior: Clip.hardEdge,
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      physics: const NeverScrollableScrollPhysics(),
-                      child: SizedBox(
-                        width: 220,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            if (_isSaExpanded)
-                              SizedBox(
-                                width: 160,
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceEvenly,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.auto_awesome,
-                                        color: Colors.black87,
-                                      ),
-                                      onPressed: () =>
-                                          setState(() => _currentIndex = 2),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.restaurant_menu,
-                                        color: Colors.black87,
-                                      ),
-                                      onPressed: () =>
-                                          setState(() => _currentIndex = 6),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.account_balance_wallet_outlined,
-                                        color: Colors.black87,
-                                      ),
-                                      onPressed: () =>
-                                          setState(() => _currentIndex = 1),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            const SizedBox(
-                              width: 56,
-                              child: Center(
-                                child: Text(
-                                  'SA',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 18,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            bottomNavigationBar: _buildBottomBar(context),
           ),
         );
       },
     );
+  }
+
+  // ===================== 下のタブバー =====================
+
+  Widget _buildBottomBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Colors.grey.shade200)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 64,
+          child: Row(
+            children: [
+              for (final index in _tabIndexes)
+                Expanded(child: _buildTabItem(index, scheme)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabItem(int index, ColorScheme scheme) {
+    final page = _pages[index];
+    final selected = _currentIndex == index;
+    final color = selected ? scheme.primary : Colors.grey.shade600;
+
+    return Semantics(
+      selected: selected,
+      button: true,
+      label: page.label,
+      child: InkWell(
+        onTap: () => _goTo(index),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              decoration: BoxDecoration(
+                color: selected
+                    ? scheme.primaryContainer
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Icon(
+                selected ? page.selectedIcon : page.icon,
+                color: color,
+                size: 24,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              page.label,
+              style: TextStyle(
+                fontSize: 11,
+                color: color,
+                fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===================== 左メニュー（ドロワー） =====================
+
+  Widget _buildDrawer({
+    required String userName,
+    required String email,
+    required Uint8List? iconBytes,
+    required Map userData,
+  }) {
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            // ---- プロフィール（タップで編集） ----
+            InkWell(
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        AccountEditScreen(initialUserData: userData),
+                  ),
+                );
+              },
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 24, 12, 20),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 28,
+                      backgroundColor: Colors.blue.shade50,
+                      backgroundImage:
+                          iconBytes != null ? MemoryImage(iconBytes) : null,
+                      child: iconBytes == null
+                          ? const Icon(Icons.person,
+                              size: 30, color: kBrandColor)
+                          : null,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            userName,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            email,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.black54,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'プロフィールを編集 ›',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: kBrandColor,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+
+            // ---- 全機能の一覧（説明つき） ----
+            _drawerSectionTitle('みんなとつながる'),
+            _drawerPageTile(_home),
+            _drawerPageTile(_search),
+            _drawerPageTile(_bookmark),
+
+            _drawerSectionTitle('じぶんの暮らし'),
+            _drawerPageTile(_budget),
+            _drawerPageTile(_ai),
+            _drawerPageTile(_cooking),
+
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.settings_outlined),
+              title: const Text('地域・調理家電の設定'),
+              subtitle: const Text('お住まいの地域・持っていない家電'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        AppSettingsScreen(initialUserData: userData),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text(
+                'ログアウト',
+                style: TextStyle(color: Colors.red),
+              ),
+              onTap: _confirmLogout,
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerSectionTitle(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          color: Colors.grey.shade600,
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerPageTile(int index) {
+    final page = _pages[index];
+    final selected = _currentIndex == index;
+
+    return ListTile(
+      selected: selected,
+      selectedTileColor: Colors.blue.shade50,
+      leading: Icon(selected ? page.selectedIcon : page.icon),
+      title: Text(page.label),
+      subtitle: Text(page.description, style: const TextStyle(fontSize: 12)),
+      onTap: () {
+        Navigator.pop(context);
+        _goTo(index);
+      },
+    );
+  }
+
+  Future<void> _confirmLogout() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('ログアウトしますか？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('ログアウト', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      if (mounted) Navigator.pop(context); // ドロワーを閉じる
+      await FirebaseAuth.instance.signOut();
+    }
   }
 }
 

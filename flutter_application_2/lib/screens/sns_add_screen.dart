@@ -9,6 +9,34 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 
 import 'ai_chat_screen.dart';
 import '../services/ai_knowledge_service.dart';
+import '../widgets/top_toast.dart';
+
+/// X風：下からせり上がる全画面で投稿画面を開く
+/// どの画面からでも openPostScreen(context); で呼べる
+Future<void> openPostScreen(BuildContext context) {
+  return Navigator.of(context).push(
+    PageRouteBuilder(
+      fullscreenDialog: true,
+      transitionDuration: const Duration(milliseconds: 300),
+      reverseTransitionDuration: const Duration(milliseconds: 250),
+      pageBuilder: (_, __, ___) => const SnsAddScreen(),
+      transitionsBuilder: (_, animation, __, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 1),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        );
+      },
+    ),
+  );
+}
 
 class SnsAddScreen extends StatefulWidget {
   final VoidCallback? onPostSuccess;
@@ -375,11 +403,13 @@ class _SnsAddScreenState extends State {
         _isUploading = false;
       });
 
-      messenger.showSnackBar(const SnackBar(content: Text('タイムラインに投稿しました！')));
+      // X風に画面の上から「投稿しました」を出して、タイムラインに戻る
+      showTopToast(context, 'タイムラインに投稿しました');
 
       if (_onPostSuccess != null) {
         _onPostSuccess!();
       }
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -389,17 +419,57 @@ class _SnsAddScreenState extends State {
     }
   }
 
+  /// 何か入力済みか（閉じるときに確認するため）
+  bool get _hasDraft =>
+      _contentController.text.trim().isNotEmpty ||
+      _recipeTitleController.text.trim().isNotEmpty ||
+      _recipeStepsController.text.trim().isNotEmpty ||
+      _imageBytesList.isNotEmpty;
+
+  /// ×ボタン・戻る操作で閉じるとき
+  Future<void> _closeScreen() async {
+    if (_isUploading) return;
+    if (!_hasDraft) {
+      Navigator.of(context).pop();
+      return;
+    }
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('投稿を破棄しますか？'),
+        content: const Text('入力した内容は保存されません。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('編集を続ける'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('破棄', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final List currentSubList = List.from(
       _subCategories[_selectedMainCategory] ?? ['指定なし'],
     );
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _closeScreen();
+      },
+      child: Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          icon: const Icon(Icons.menu),
-          onPressed: () => Scaffold.of(context).openDrawer(),
+          icon: const Icon(Icons.close),
+          tooltip: '閉じる',
+          onPressed: _closeScreen,
         ),
         title: const Text(
           '新規投稿',
@@ -783,6 +853,7 @@ class _SnsAddScreenState extends State {
           ],
         ),
       ),
+    ),
     );
   }
 }
