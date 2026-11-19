@@ -6,6 +6,7 @@ class LargeExpenseModel {
   final String userId; // ユーザーUID
   final String name; // 支出名（例: 車検、旅行など）
   final int amount; // 金額
+  final DateTime? dueDate; // 支払い予定日（任意。未設定の古いデータは null）
   final DateTime? createdAt; // 作成日時
 
   LargeExpenseModel({
@@ -13,6 +14,7 @@ class LargeExpenseModel {
     required this.userId,
     required this.name,
     required this.amount,
+    this.dueDate,
     this.createdAt,
   });
 
@@ -24,6 +26,7 @@ class LargeExpenseModel {
       userId: data['userId'] ?? '',
       name: data['name'] ?? '',
       amount: data['amount'] ?? 0,
+      dueDate: (data['dueDate'] as Timestamp?)?.toDate(),
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
     );
   }
@@ -34,6 +37,7 @@ class LargeExpenseModel {
       'userId': userId,
       'name': name,
       'amount': amount,
+      'dueDate': dueDate != null ? Timestamp.fromDate(dueDate!) : null,
       'createdAt': createdAt ?? FieldValue.serverTimestamp(),
     };
   }

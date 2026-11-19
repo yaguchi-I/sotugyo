@@ -12,6 +12,8 @@ import '../services/ai_knowledge_service.dart';
 import 'ai_chat_screen.dart';
 import 'sns_reply_screen.dart';
 import 'sns_detail_screen.dart';
+import 'sns_add_screen.dart';
+import '../widgets/top_toast.dart';
 
 class SnsScreen extends StatefulWidget {
   const SnsScreen({super.key});
@@ -23,7 +25,8 @@ class SnsScreen extends StatefulWidget {
 class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final ScrollController _recommendScrollCtrl = ScrollController();
-  final ScrollController _latestScrollCtrl = ScrollController();
+  final ScrollController _followingScrollCtrl = ScrollController();
+  final ScrollController _tagScrollCtrl = ScrollController();
   bool _showScrollToTop = false;
 
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
@@ -37,28 +40,75 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   final Map _userIconCache = {};
   final Set _viewedPostIds = Set();
 
+  // ---- 「フォロー中」タブ用 ----
+  // TODO(フォロー機能担当の人へ): users ドキュメントでフォロー中のユーザーIDを
+  // 入れるフィールド名が決まったら、ここだけ書き換えてください。
+  // 中身は「フォローしている人の uid の配列」を想定しています。
+  static const String _followingField = 'following';
+
+  // ---- 「タグ別」タブ用 ----
+  static const String _all = 'すべて';
+  static const Map<String, List<String>> _tagCategories = {
+    '料理': ['野菜', '肉類', '麺類', '作り置き', 'その他'],
+    '掃除': ['キッチン', 'お風呂', 'トイレ', 'リビング', 'その他'],
+    '収納': ['クローゼット', 'デスク周り', '小物', 'その他'],
+    'その他': [],
+  };
+  static const Map<String, IconData> _tagIcons = {
+    _all: Icons.apps,
+    '料理': Icons.restaurant,
+    '掃除': Icons.cleaning_services_outlined,
+    '収納': Icons.inventory_2_outlined,
+    'その他': Icons.more_horiz,
+  };
+  String _tagMain = _all;
+  String _tagSub = _all;
+
+  // タグを切り替えるたびに通信し直さないよう、ストリームは1回だけ作る
+  late final Stream<DocumentSnapshot>? _userPrefStream = currentUserId.isNotEmpty
+      ? FirebaseFirestore.instance
+            .collection('users')
+            .doc(currentUserId)
+            .snapshots()
+      : null;
+  late final Stream<QuerySnapshot> _postsStream = FirebaseFirestore.instance
+      .collection('posts')
+      .orderBy('createdAt', descending: true)
+      .snapshots();
+
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     _tabController.addListener(_updateScrollToTopVisibility);
     _recommendScrollCtrl.addListener(_updateScrollToTopVisibility);
-    _latestScrollCtrl.addListener(_updateScrollToTopVisibility);
+    _followingScrollCtrl.addListener(_updateScrollToTopVisibility);
+    _tagScrollCtrl.addListener(_updateScrollToTopVisibility);
   }
 
   @override
   void dispose() {
     _tabController.removeListener(_updateScrollToTopVisibility);
     _recommendScrollCtrl.removeListener(_updateScrollToTopVisibility);
-    _latestScrollCtrl.removeListener(_updateScrollToTopVisibility);
+    _followingScrollCtrl.removeListener(_updateScrollToTopVisibility);
+    _tagScrollCtrl.removeListener(_updateScrollToTopVisibility);
     _tabController.dispose();
     _recommendScrollCtrl.dispose();
-    _latestScrollCtrl.dispose();
+    _followingScrollCtrl.dispose();
+    _tagScrollCtrl.dispose();
     super.dispose();
   }
 
-  ScrollController get _activeScrollController =>
-      _tabController.index == 0 ? _recommendScrollCtrl : _latestScrollCtrl;
+  ScrollController get _activeScrollController {
+    switch (_tabController.index) {
+      case 1:
+        return _followingScrollCtrl;
+      case 2:
+        return _tagScrollCtrl;
+      default:
+        return _recommendScrollCtrl;
+    }
+  }
 
   void _updateScrollToTopVisibility() {
     final ctrl = _activeScrollController;
@@ -403,6 +453,9 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     if (currentUserId.isEmpty) return;
     final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
     final isAdded = currentUsers.contains(currentUserId);
+
+    // 押した瞬間に上から通知を出す（X風）
+    showReactionToast(context, listField, added: !isAdded);
 
     int nextLikes = likesCount;
     int nextHelpfuls = helpfulsCount;
@@ -997,6 +1050,16 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
+      // X風：右下に浮かぶ投稿ボタン
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'postBtn',
+        onPressed: () => openPostScreen(context),
+        tooltip: '投稿する',
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+        shape: const CircleBorder(),
+        child: const Icon(Icons.edit_outlined, size: 26),
+      ),
       appBar: AppBar(
         backgroundColor: Colors.white,
         leading: IconButton(
@@ -1042,24 +1105,21 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
           ),
           tabs: const [
             Tab(text: 'おすすめ'),
-            Tab(text: '最新'),
+            Tab(text: 'フォロー中'),
+            Tab(text: 'タグ別'),
           ],
         ),
       ),
       body: Stack(
         children: [
           StreamBuilder(
-            stream: currentUserId.isNotEmpty
-                ? FirebaseFirestore.instance
-                      .collection('users')
-                      .doc(currentUserId)
-                      .snapshots()
-                : null,
+            stream: _userPrefStream,
             builder: (context, userPrefSnap) {
               List interestedTags = [];
               List lessInterestedTopics = [];
               List blockedUsers = [];
               List missingAppliances = [];
+              List followingUsers = [];
 
               if (userPrefSnap.hasData && userPrefSnap.data != null) {
                 final uDoc = userPrefSnap.data as DocumentSnapshot;
@@ -1079,14 +1139,14 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   if (uData['missingAppliances'] != null) {
                     missingAppliances = List.from(uData['missingAppliances']);
                   }
+                  if (uData[_followingField] is List) {
+                    followingUsers = List.from(uData[_followingField]);
+                  }
                 }
               }
 
               return StreamBuilder(
-                stream: FirebaseFirestore.instance
-                    .collection('posts')
-                    .orderBy('createdAt', descending: true)
-                    .snapshots(),
+                stream: _postsStream,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Center(child: CircularProgressIndicator());
@@ -1165,10 +1225,15 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         lessInterestedTopics: lessInterestedTopics,
                         missingAppliances: missingAppliances,
                       ),
-                      _buildFeedList(
+                      _buildFollowingFeed(
                         docs: visibleDocs,
-                        controller: _latestScrollCtrl,
-                        isRecommendedTab: false,
+                        followingUsers: followingUsers,
+                        interestedTags: interestedTags,
+                        lessInterestedTopics: lessInterestedTopics,
+                        missingAppliances: missingAppliances,
+                      ),
+                      _buildTagFeed(
+                        docs: visibleDocs,
                         interestedTags: interestedTags,
                         lessInterestedTopics: lessInterestedTopics,
                         missingAppliances: missingAppliances,
@@ -1181,8 +1246,8 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
           ),
           if (_showScrollToTop)
             Positioned(
-              right: 20,
-              bottom: 98,
+              right: 24, // 投稿ボタンの真上にそろえる
+              bottom: 88,
               child: FloatingActionButton.small(
                 heroTag: 'scrollToTopBtn',
                 tooltip: '一番上へ戻る',
@@ -1194,6 +1259,270 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
             ),
         ],
       ),
+    );
+  }
+
+  // ===================== フォロー中タブ =====================
+
+  Widget _buildFollowingFeed({
+    required List docs,
+    required List followingUsers,
+    required List interestedTags,
+    required List lessInterestedTopics,
+    required List missingAppliances,
+  }) {
+    // まだ誰もフォローしていない（フォロー機能ができる前もここに来る）
+    if (followingUsers.isEmpty) {
+      return _buildFollowingEmpty(
+        icon: Icons.person_add_alt_1_outlined,
+        title: 'まだ誰もフォローしていません',
+        message: '気になる投稿者をフォローすると、\nその人の投稿だけがここに並びます',
+      );
+    }
+
+    final filtered = docs.where((d) {
+      final post = (d as QueryDocumentSnapshot).data() as Map;
+      final uid = post['userId']?.toString() ?? '';
+      return uid.isNotEmpty && followingUsers.contains(uid);
+    }).toList();
+
+    if (filtered.isEmpty) {
+      return _buildFollowingEmpty(
+        icon: Icons.forum_outlined,
+        title: 'フォロー中の人の投稿はまだありません',
+        message: '新しい投稿があるとここに表示されます',
+      );
+    }
+
+    return _buildFeedList(
+      docs: filtered,
+      controller: _followingScrollCtrl,
+      isRecommendedTab: false,
+      interestedTags: interestedTags,
+      lessInterestedTopics: lessInterestedTopics,
+      missingAppliances: missingAppliances,
+    );
+  }
+
+  Widget _buildFollowingEmpty({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 88,
+              height: 88,
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, size: 42, color: Colors.blue),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.grey.shade600,
+                height: 1.6,
+              ),
+            ),
+            const SizedBox(height: 20),
+            OutlinedButton.icon(
+              onPressed: () => _tabController.animateTo(0),
+              icon: const Icon(Icons.auto_awesome, size: 18),
+              label: const Text('おすすめから探す'),
+              style: OutlinedButton.styleFrom(shape: const StadiumBorder()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===================== タグ別タブ =====================
+
+  bool _matchesTag(Map post, String main, String sub) {
+    if (main == _all) return true;
+    final postMain = post['mainCategory']?.toString() ?? '';
+    if (postMain != main) return false;
+    if (sub == _all) return true;
+    return (post['subCategory']?.toString() ?? '') == sub;
+  }
+
+  int _countTag(List docs, String main, String sub) {
+    int count = 0;
+    for (final d in docs) {
+      final post = (d as QueryDocumentSnapshot).data() as Map;
+      if (_matchesTag(post, main, sub)) count++;
+    }
+    return count;
+  }
+
+  Widget _buildTagFeed({
+    required List docs,
+    required List interestedTags,
+    required List lessInterestedTopics,
+    required List missingAppliances,
+  }) {
+    final filtered = docs.where((d) {
+      final post = (d as QueryDocumentSnapshot).data() as Map;
+      return _matchesTag(post, _tagMain, _tagSub);
+    }).toList();
+
+    final mainList = [_all, ..._tagCategories.keys];
+    final subList = _tagMain == _all
+        ? <String>[]
+        : (_tagCategories[_tagMain] ?? <String>[]);
+
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          color: Colors.white,
+          padding: const EdgeInsets.only(top: 10, bottom: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ---- 大カテゴリ ----
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: mainList.map((main) {
+                    final selected = _tagMain == main;
+                    final count = _countTag(docs, main, _all);
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        avatar: Icon(
+                          _tagIcons[main] ?? Icons.label_outline,
+                          size: 18,
+                          color: selected ? Colors.white : Colors.black54,
+                        ),
+                        label: Text('$main  $count'),
+                        selected: selected,
+                        showCheckmark: false,
+                        selectedColor: Colors.blue,
+                        backgroundColor: Colors.grey.shade100,
+                        side: BorderSide(
+                          color: selected ? Colors.blue : Colors.grey.shade300,
+                        ),
+                        labelStyle: TextStyle(
+                          color: selected ? Colors.white : Colors.black87,
+                          fontWeight:
+                              selected ? FontWeight.bold : FontWeight.normal,
+                        ),
+                        shape: const StadiumBorder(),
+                        onSelected: (_) {
+                          setState(() {
+                            _tagMain = main;
+                            _tagSub = _all;
+                          });
+                        },
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+
+              // ---- 小カテゴリ（大カテゴリを選んだときだけ出る） ----
+              AnimatedSize(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOut,
+                child: subList.isEmpty
+                    ? const SizedBox(width: double.infinity)
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Row(
+                            children: [_all, ...subList].map((sub) {
+                              final selected = _tagSub == sub;
+                              final count = _countTag(docs, _tagMain, sub);
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: FilterChip(
+                                  label: Text('$sub $count'),
+                                  selected: selected,
+                                  showCheckmark: false,
+                                  visualDensity: VisualDensity.compact,
+                                  selectedColor: Colors.blue.shade50,
+                                  backgroundColor: Colors.white,
+                                  side: BorderSide(
+                                    color: selected
+                                        ? Colors.blue
+                                        : Colors.grey.shade300,
+                                  ),
+                                  labelStyle: TextStyle(
+                                    fontSize: 12,
+                                    color: selected
+                                        ? Colors.blue.shade800
+                                        : Colors.black54,
+                                    fontWeight: selected
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                  ),
+                                  shape: const StadiumBorder(),
+                                  onSelected: (_) {
+                                    setState(() => _tagSub = sub);
+                                  },
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+        Divider(height: 1, color: Colors.grey.shade200),
+        Expanded(
+          child: filtered.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _tagIcons[_tagMain] ?? Icons.label_outline,
+                        size: 48,
+                        color: Colors.grey.shade300,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        _tagSub == _all
+                            ? '「$_tagMain」の投稿はまだありません'
+                            : '「$_tagMain・$_tagSub」の投稿はまだありません',
+                        style: const TextStyle(color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                )
+              : _buildFeedList(
+                  docs: filtered,
+                  controller: _tagScrollCtrl,
+                  isRecommendedTab: false,
+                  interestedTags: interestedTags,
+                  lessInterestedTopics: lessInterestedTopics,
+                  missingAppliances: missingAppliances,
+                ),
+        ),
+      ],
     );
   }
 

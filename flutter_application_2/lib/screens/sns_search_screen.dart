@@ -9,6 +9,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'ai_chat_screen.dart';
 import 'sns_detail_screen.dart';
 import 'sns_reply_screen.dart';
+import '../widgets/top_toast.dart';
 
 class SnsSearchScreen extends StatefulWidget {
   const SnsSearchScreen({super.key});
@@ -1226,6 +1227,11 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                       count: likesCount,
                       onTap: () {
                         if (currentUserId.isEmpty) return;
+                        showReactionToast(
+                          context,
+                          'likedUsers',
+                          added: !isLiked,
+                        );
                         final docRef = FirebaseFirestore.instance
                             .collection('posts')
                             .doc(docId);
@@ -1250,6 +1256,11 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                       count: helpfulsCount,
                       onTap: () {
                         if (currentUserId.isEmpty) return;
+                        showReactionToast(
+                          context,
+                          'helpfulUsers',
+                          added: !isHelpful,
+                        );
                         final docRef = FirebaseFirestore.instance
                             .collection('posts')
                             .doc(docId);
@@ -1275,6 +1286,11 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                       ),
                       onPressed: () {
                         if (currentUserId.isEmpty) return;
+                        showReactionToast(
+                          context,
+                          'savedUsers',
+                          added: !isSaved,
+                        );
                         final docRef = FirebaseFirestore.instance
                             .collection('posts')
                             .doc(docId);
