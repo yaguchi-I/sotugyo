@@ -5,9 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import '../services/ai_knowledge_service.dart';
-import 'ai_chat_screen.dart';
-import 'sns_detail_screen.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_detail_screen.dart' show SnsDetailScreen;
 
 class CookingScreen extends StatefulWidget {
   const CookingScreen({super.key});

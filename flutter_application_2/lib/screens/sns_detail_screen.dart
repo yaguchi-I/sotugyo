@@ -7,10 +7,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import '../services/ai_knowledge_service.dart';
-import 'ai_chat_screen.dart';
-import 'sns_reply_screen.dart';
-import 'sns_screen.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_reply_screen.dart' show SnsReplyScreen;
+import 'sns_screen.dart' show PostImageCarousel;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsDetailScreen extends StatefulWidget {
   final String postId;
@@ -315,6 +316,8 @@ class _SnsDetailScreenState extends State {
     if (currentUserId.isEmpty) return;
     final docRef = FirebaseFirestore.instance.collection('posts').doc(_postId);
     final isAdded = currentUsers.contains(currentUserId);
+
+    showReactionToast(context, listField, added: !isAdded);
 
     int nextLikes = likesCount;
     int nextHelpfuls = helpfulsCount;

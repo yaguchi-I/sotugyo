@@ -6,8 +6,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-import '../services/ai_knowledge_service.dart';
-import 'sns_detail_screen.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'sns_detail_screen.dart' show SnsDetailScreen;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class AiChatScreen extends StatefulWidget {
   final String? initialPrompt;
@@ -56,15 +57,12 @@ class _AiChatScreenState extends State {
   String _activeModelName = AiChatScreen.fallbackModels.first.toString();
 
   final List _quickPrompts = [
-    {
-      'label': '🍲 鍋で作れる安い料理',
-      'prompt': '鍋で作れるあまり高くないおすすめの料理はある？みんなの投稿も参考にして教えて！',
-    },
+    {'label': '🍲 鍋で作れる安い料理', 'prompt': '鍋で作れるあまり高くないおすすめの料理レシピを教えて！'},
     {
       'label': '🍳 150円以下のスピード飯',
       'prompt': '150円以下で10分以内に作れる、洗い物が少ない節約レシピを教えて！',
     },
-    {'label': '🥬 冷蔵庫の余り物で1品', 'prompt': '一人暮らしの冷蔵庫に余りがちな食材を使った簡単おかずのレシピを教えて！'},
+    {'label': '🥬 余り物で1品作りたい', 'prompt': '豚こま肉とキャベツと卵が余ってるんだけど、おすすめレシピ教えて！'},
     {'label': '💡 光熱費を削る裏技', 'prompt': '今の季節にすぐ実践できる、電気代・ガス代・水道代の効果的な節約術を教えて！'},
     {
       'label': '🧹 100均グッズで時短掃除',
@@ -79,7 +77,8 @@ class _AiChatScreenState extends State {
   final ScrollController _scrollController = ScrollController();
   final List _messages = [];
   final List _chatHistorySessions = [];
-  final Set _savedMessageIndexes = Set();
+  final Map _savedDocIdByIndex = {};
+  final Map _servingsByIndex = {};
   String _currentSessionId = '';
   bool _isLoading = false;
   String _loadingStatus = 'AIが回答を考えています...';
@@ -120,69 +119,42 @@ class _AiChatScreenState extends State {
     return '$m/$d $hh:$mm';
   }
 
-  bool _isCookingQuery(String text) {
-    const List cookingKeywords = [
-      'レシピ',
-      '料理',
-      '作り方',
-      '献立',
-      'おかず',
-      'ご飯',
-      'ごはん',
-      'スピード飯',
-      '作り置き',
-      '食材',
-      '弁当',
-      '朝食',
-      '昼食',
-      '夕食',
-      '夕飯',
-      '夜ご飯',
-      '自炊',
-      'メニュー',
-      '炒め',
-      '煮物',
-      'パスタ',
-      'うどん',
-      '丼',
-      'スープ',
-      '味噌汁',
-      'おつまみ',
-      '鍋',
-      'キャベツ',
-      '豚肉',
-      '鶏肉',
-    ];
-    const List nonCookingKeywords = [
-      '掃除',
-      '洗濯',
-      '光熱費',
-      '電気代',
-      'ガス代',
-      '水道代',
-      '家賃',
-      '収納',
-      'ゴミ',
-      'カビ',
-      '排水口',
-      'トイレ',
-      'お風呂',
-      'エアコン',
-      '引っ越し',
-      '防犯',
-      '虫',
-      'ゴキブリ',
-      '貯金',
-      '通信費',
-    ];
+  String _formatScaledNumber(double val) {
+    if ((val - val.round()).abs() < 0.05) {
+      return val.round().toString();
+    }
+    return val.toStringAsFixed(1);
+  }
 
-    for (final nk in nonCookingKeywords) {
-      if (text.contains(nk.toString())) return false;
+  String _scaleAmountString(
+    String rawAmount,
+    int baseServings,
+    int targetServings,
+  ) {
+    if (baseServings <= 0 || baseServings == targetServings) {
+      return rawAmount;
     }
-    for (final ck in cookingKeywords) {
-      if (text.contains(ck.toString())) return true;
+    final double ratio = targetServings / baseServings;
+
+    final fractionRegex = RegExp(r'(\d+)\s*/\s*(\d+)');
+    if (fractionRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(fractionRegex, (match) {
+        final num = double.tryParse(match.group(1) ?? '1') ?? 1;
+        final den = double.tryParse(match.group(2) ?? '1') ?? 1;
+        if (den == 0) return match.group(0) ?? '';
+        return _formatScaledNumber((num / den) * ratio);
+      });
     }
-    return false;
+
+    final decimalRegex = RegExp(r'(\d+(?:\.\d+)?)');
+    if (decimalRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(decimalRegex, (match) {
+        final num = double.tryParse(match.group(1) ?? '0') ?? 0;
+        return _formatScaledNumber(num * ratio);
+      });
+    }
+
+    return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
   String _buildSystemPrompt() {
@@ -193,28 +165,32 @@ class _AiChatScreenState extends State {
         : _missingAppliances.join('、');
     final areaText = _userArea.isEmpty ? '日本' : _userArea;
 
-    return 'あなたは一人暮らし向けSNSアプリ専属の超優秀なAIライフアドバイザーです。\n'
-        'ユーザー名：$_userName\n'
-        '現在：${now.year}年${now.month}月${now.day}日（季節：$season）\n'
-        '居住地域：$areaText\n'
-        '持っていない調理家電：$missingText\n\n'
-        '【コミュニティ連携の最優先ルール】\n'
-        '・プロンプト内に「【アプリ内のみんなの実体験投稿】」が渡された場合、その中から相談に最も役立つ投稿を積極的に引用し、「アプリ内では〇〇さんの『△△』という投稿も好評ですよ！」のように自然に紹介してください。\n'
-        '・通常のつぶやき投稿（例：春キャベツの肉巻きが美味しかった等）であっても、ユーザーの条件（例：鍋で作る）に合わせて「鍋でロールキャベツ風に煮込むと美味しいですよ」のように具体的にアレンジ提案してください。\n'
-        '・参考にした投稿がある場合は、回答のいちばん最後の行だけに [REF:docId1,docId2] の形式で該当のdocIdをカンマ区切りで出力してください（最大3件）。参考にした投稿がなければ [REF:] は書かないでください。\n\n'
-        '【回答フォーマットのルール】\n'
-        '1. 掃除・洗濯・光熱費節約・収納・生活の悩み・雑談など「料理のレシピ以外」の質問の場合：\n'
-        '   ・レシピ形式（【料理名】【材料】【作り方】）は絶対に使わず、読みやすい自然な文章や箇条書きで答えてください。\n'
-        '2. ユーザーが明確に「料理のレシピ・献立・食べ物の作り方」を求めた場合のみ：\n'
-        '   ・持っていない調理家電（$missingText）を一切使わないレシピを考案し、以下の見出しを使って1人分の分量で回答してください。\n'
-        '   【料理名】〇〇\n'
-        '   【目安時間・費用】約〇分 / 約〇円\n'
-        '   【材料】\n'
-        '   ・材料名 分量\n'
-        '   【作り方】\n'
-        '   1. 手順1\n'
-        '   2. 手順2\n'
-        '3. 共通事項：Markdownの強調記号（**や##）は使わず、プレーンテキストで読みやすく出力してください。';
+    return 'あなたは一人暮らしの頼れる相談相手であり、料理・家事・節約の実践知識が豊富なAIパートナーです。\n'
+        '相手：$_userNameさん / 時期：${now.year}年${now.month}月（$season） / 地域：$areaText / 持っていない家電：$missingText\n\n'
+        '【話し方と基本ルール】\n'
+        '・教科書の音読のような硬い解説や、「今回はレシピの相談ではないため〜」といったシステム説明は絶対に書かないこと。\n'
+        '・「ぜひ試してみてくださいね！」のような毎回同じ定型締めは避け、相談に合った自然な一言で締めること。\n'
+        '・持っていない家電（$missingText）を使う提案は絶対にしないこと。\n'
+        '・Markdown記号（** や ## や ```）は一切使わないこと。\n\n'
+        '【料理・食材・レシピ相談のときの必須フォーマット】\n'
+        '・ユーザーが料理・献立・食材の使い道・レシピの話をしているときは、最初に親しみやすい1〜2文の導入を添えたうえで、必ず1人分のレシピを次の正確な見出し形式で出力すること（アプリがこの見出しを解析して人数計算・代用案ボタン付きレシピカードを表示するため）：\n'
+        '【料理名】具体的な料理名\n'
+        '【目安時間】約10分\n'
+        '【目安費用】約180円\n'
+        '【材料】\n'
+        '・材料名 分量（例：・豚こま肉 100g のように材料名と分量を半角スペースで区切る。数値を含めること）\n'
+        '・調味料名 分量\n'
+        '【作り方】\n'
+        '1. 手順1\n'
+        '2. 手順2\n'
+        '【ポイント】\n'
+        '美味しく作るコツやアレンジの一言\n\n'
+        '【料理以外の相談（掃除・収納・光熱費・雑談など）のとき】\n'
+        '・上のレシピ見出しは使わず、自然な会話文や簡潔な箇条書きで答えること。\n\n'
+        '【アプリ内投稿の扱い方】\n'
+        '・メッセージ末尾に「参考候補（アプリ内投稿）」が添えられることがあるが、あくまで補助資料。\n'
+        '・相談テーマにドンピシャで役立つ投稿があるときだけ、会話の中で自然に1〜2件だけ触れること。無関係な投稿は完全に無視すること。\n'
+        '・本当に参考にした投稿がある場合のみ、回答のいちばん最後の行だけに [REF:docId1,docId2] と出力すること（最大2件）。該当がなければ [REF:] 行は書かないこと。';
   }
 
   void _initAiSession([String? modelName]) {
@@ -228,6 +204,7 @@ class _AiChatScreenState extends State {
     _model = GenerativeModel(
       model: targetModel,
       apiKey: currentKey,
+      generationConfig: GenerationConfig(temperature: 0.7),
       systemInstruction: Content.system(_buildSystemPrompt()),
     );
     _chatSession = _model!.startChat(
@@ -395,7 +372,7 @@ class _AiChatScreenState extends State {
               _messages.add({
                 'role': 'ai',
                 'text':
-                    'こんにちは、$_userNameさん！\nみんなの投稿（レシピや節約・掃除の知恵）も検索しながら、あなたの環境に合わせて提案します。何でも気軽に相談してくださいね！',
+                    'こんにちは、$_userNameさん！冷蔵庫の余り物や今日のご飯、掃除や節約の相談まで何でも気軽に聞いてくださいね。',
                 'time': _formatNowTime(),
                 'referencedPosts': [],
               });
@@ -437,12 +414,13 @@ class _AiChatScreenState extends State {
   void _startNewChatSession() {
     setState(() {
       _currentSessionId = 'session_${DateTime.now().millisecondsSinceEpoch}';
-      _savedMessageIndexes.clear();
+      _savedDocIdByIndex.clear();
+      _servingsByIndex.clear();
       _messages
         ..clear()
         ..add({
           'role': 'ai',
-          'text': '新しい相談スレッドを開始しました！\n料理・掃除・節約・暮らしの疑問など、みんなの投稿も探しながらお答えします。',
+          'text': '新しい相談ですね！余っている食材や作りたい料理、暮らしの疑問などそのまま聞いてください。',
           'time': _formatNowTime(),
           'referencedPosts': [],
         });
@@ -682,8 +660,8 @@ class _AiChatScreenState extends State {
                                                 onPressed: () {
                                                   setState(() {
                                                     _currentSessionId = sId;
-                                                    _savedMessageIndexes
-                                                        .clear();
+                                                    _savedDocIdByIndex.clear();
+                                                    _servingsByIndex.clear();
                                                     _messages
                                                       ..clear()
                                                       ..addAll(sMsgs);
@@ -757,8 +735,7 @@ class _AiChatScreenState extends State {
       if (_messages.isEmpty) {
         _messages.add({
           'role': 'ai',
-          'text':
-              '設定ありがとうございます！\n地域（$_userArea）や家電状況、さらにアプリ内のみんなの実体験投稿も検索しながらサポートしますね！',
+          'text': '設定ありがとうございます！$_userAreaの環境や家電に合わせてお答えしますね。何でも聞いてください。',
           'time': _formatNowTime(),
           'referencedPosts': [],
         });
@@ -804,7 +781,8 @@ class _AiChatScreenState extends State {
   String _formatCommunityPostsForPrompt(List posts) {
     if (posts.isEmpty) return '';
     final buffer = StringBuffer();
-    buffer.writeln('\n【アプリ内のみんなの実体験投稿（優先度順）】');
+    buffer.writeln('\n---');
+    buffer.writeln('参考候補（アプリ内投稿・関連する場合のみ任意で利用。無関係なら無視すること）：');
     for (int i = 0; i < posts.length; i++) {
       final p = posts[i] as Map;
       final docId = (p['docId'] ?? '').toString();
@@ -812,16 +790,14 @@ class _AiChatScreenState extends State {
       final title = (p['title'] ?? '').toString();
       final content = (p['content'] ?? '').toString();
       final cost = (p['recipeCost'] ?? '').toString();
-      final priceTier = (p['priceTier'] ?? 'none').toString();
       final helpfuls = p['helpfuls'] ?? 0;
       final saves = p['saves'] ?? 0;
-      final likes = p['likes'] ?? 0;
       final ingItems = _toMapList(p['recipeIngredients']);
       final ings = ingItems
           .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}'.trim())
           .join('、');
       buffer.writeln(
-        '${i + 1}. [docId:$docId] 投稿者:$userName / カテゴリ:${p['mainCategory']}(${p['subCategory']}) / 評価:保存$saves・参考になった$helpfuls・いいね$likes / 価格帯:$priceTier ${cost.isNotEmpty ? "($cost)" : ""}',
+        '${i + 1}. [docId:$docId] $userName / ${p['mainCategory']} / 保存$saves・参考$helpfuls ${cost.isNotEmpty ? "($cost)" : ""}',
       );
       if (title.isNotEmpty) buffer.writeln('   タイトル: $title');
       if (content.isNotEmpty) buffer.writeln('   本文: $content');
@@ -855,27 +831,17 @@ class _AiChatScreenState extends State {
       }
     }
 
+    final fence = String.fromCharCodes([96, 96, 96]);
     final cleanText = rawReply
         .replaceAll(regex, '')
+        .replaceAll(fence, '')
         .replaceAll('**', '')
         .replaceAll('##', '')
         .trim();
 
-    if (selectedRefs.isEmpty && candidatePosts.isNotEmpty) {
-      for (final rawP in candidatePosts.take(2)) {
-        final p = rawP as Map;
-        final double rScore = (p['rankScore'] is num)
-            ? (p['rankScore'] as num).toDouble()
-            : 0.0;
-        if (rScore >= 25.0) {
-          selectedRefs.add(p);
-        }
-      }
-    }
-
     return {
       'cleanText': cleanText,
-      'referencedPosts': selectedRefs.take(3).toList(),
+      'referencedPosts': selectedRefs.take(2).toList(),
     };
   }
 
@@ -891,7 +857,7 @@ class _AiChatScreenState extends State {
       setState(() {
         _messages.add({
           'role': 'ai',
-          'text': 'APIキーがまだ設定されていません。\nai_chat_screen.dart の20行目にある apiKey にキーを貼り付けて保存してください。',
+          'text': 'APIキーがまだ設定されていません。\nai_chat_screen.dart の19行目にある apiKey にキーを貼り付けて保存してください。',
           'time': _formatNowTime(),
           'referencedPosts': [],
         });
@@ -915,7 +881,7 @@ class _AiChatScreenState extends State {
       }
       _selectedImageBytes = null;
       _isLoading = true;
-      _loadingStatus = '🔍 相談内容を解析中...';
+      _loadingStatus = '🔍 相談内容を整理しています...';
     });
     _scrollToBottom();
 
@@ -934,7 +900,7 @@ class _AiChatScreenState extends State {
         if (rawPlan is Map && rawPlan['needsSearch'] == true) {
           if (mounted) {
             setState(() {
-              _loadingStatus = '📚 みんなの投稿から参考になる実体験を検索中...';
+              _loadingStatus = '📚 関連するみんなの投稿を確認しています...';
             });
           }
 
@@ -951,7 +917,7 @@ class _AiChatScreenState extends State {
                 missingAppliances: _missingAppliances,
                 currentUserId: _currentUserId,
                 blockedUsers: _blockedUsers,
-                topK: 5,
+                topK: 4,
               );
 
           if (rawFound is List) {
@@ -970,20 +936,16 @@ class _AiChatScreenState extends State {
 
     if (mounted) {
       setState(() {
-        _loadingStatus = retrievedPosts.isNotEmpty
-            ? '✨ 見つかった${retrievedPosts.length}件の投稿とあなたの環境を元に回答を作成中...'
-            : '✨ あなたの環境に合わせて回答を作成中...';
+        _loadingStatus = '✨ 回答を考えています...';
       });
     }
 
-    final bool wantsRecipe = _isCookingQuery(rawText);
     final String communityContext = _formatCommunityPostsForPrompt(
       retrievedPosts,
     );
-
-    final String wrappedPrompt = wantsRecipe
-        ? '$rawText\n$communityContext\n（※料理・レシピの相談なので、【料理名】【目安時間・費用】【材料】【作り方】の形式で1人分の分量を具体的に回答してください。持っていない家電は使わないでください。アプリ内投稿が役立つ場合は自然に紹介し、最後に [REF:docId] を付けてください。）'
-        : '$rawText\n$communityContext\n（※これは料理のレシピ相談ではありません。【料理名】や【材料】【作り方】などのレシピ用フォーマットは絶対に使わず、相談内容に合った自然な文章やアドバイス形式で回答してください。アプリ内投稿が役立つ場合は自然に紹介し、最後に [REF:docId] を付けてください。）';
+    final String finalPrompt = communityContext.isEmpty
+        ? rawText
+        : '$rawText$communityContext';
 
     String? aiReply;
     Object? lastError;
@@ -998,8 +960,8 @@ class _AiChatScreenState extends State {
         GenerateContentResponse response;
         if (imageBytes != null) {
           final promptText = rawText.isEmpty
-              ? 'この画像を見て、もし食材なら作れるレシピを、もし汚れや日用品なら掃除や活用のアドバイスを自然に教えてください。'
-              : wrappedPrompt;
+              ? 'この画像を見て、食材ならおすすめレシピを【料理名】【目安時間】【目安費用】【材料】【作り方】【ポイント】の形式で、汚れや日用品なら実践的な対処法を自然な言葉で教えてください。'
+              : finalPrompt;
           response = await _model!
               .generateContent([
                 Content.multi([
@@ -1010,7 +972,7 @@ class _AiChatScreenState extends State {
               .timeout(const Duration(seconds: 25));
         } else {
           response = await _chatSession!
-              .sendMessage(Content.text(wrappedPrompt))
+              .sendMessage(Content.text(finalPrompt))
               .timeout(const Duration(seconds: 25));
         }
 
@@ -1052,8 +1014,7 @@ class _AiChatScreenState extends State {
   Map _parseAiSuggestion(String text) {
     final bool isActualRecipe =
         text.contains('【料理名】') &&
-        text.contains('【材料】') &&
-        text.contains('【作り方】');
+        (text.contains('【材料') || text.contains('【作り方') || text.contains('【手順'));
 
     if (!isActualRecipe) {
       String summaryTitle = 'AIからの生活アドバイス';
@@ -1075,6 +1036,8 @@ class _AiChatScreenState extends State {
       }
       return {
         'isRecipe': false,
+        'intro': text,
+        'outro': '',
         'title': summaryTitle,
         'subCategory': '節約術',
         'time': '',
@@ -1085,87 +1048,262 @@ class _AiChatScreenState extends State {
     }
 
     String title = 'AI提案レシピ';
-    String time = '約10分';
-    String cost = '約200円';
+    String time = '';
+    String cost = '';
+    final List introLines = [];
+    final List outroLines = [];
     final List ingredientsData = [];
     final List stepsLines = [];
 
-    final titleMatch = RegExp(r'【料理名】\s*(.+)').firstMatch(text);
-    if (titleMatch != null && titleMatch.group(1) != null) {
-      title = titleMatch.group(1)!.trim();
-    }
-
-    final timeCostMatch = RegExp(r'【目安時間・費用】\s*(.+)').firstMatch(text);
-    if (timeCostMatch != null && timeCostMatch.group(1) != null) {
-      final tc = timeCostMatch.group(1)!.trim();
-      final parts = tc.split(RegExp(r'[/／・]'));
-      if (parts.isNotEmpty) time = parts[0].trim();
-      if (parts.length > 1) cost = parts[1].trim();
-    }
-
     final lines = text.split('\n');
-    String currentSection = '';
+    String section = 'intro';
+
     for (final rawLine in lines) {
       final line = rawLine.trim();
-      if (line.isEmpty) continue;
-      if (line.contains('【材料')) {
-        currentSection = 'ing';
-        continue;
-      } else if (line.contains('【作り方') || line.contains('【手順')) {
-        currentSection = 'step';
-        continue;
-      } else if (line.startsWith('【')) {
-        currentSection = '';
+      if (line.isEmpty) {
+        if (section == 'intro' && introLines.isNotEmpty) {
+          introLines.add('');
+        } else if (section == 'outro' && outroLines.isNotEmpty) {
+          outroLines.add('');
+        }
         continue;
       }
 
-      if (currentSection == 'ing') {
+      if (line.startsWith('【料理名】')) {
+        section = 'title';
+        final val = line.replaceFirst('【料理名】', '').trim();
+        if (val.isNotEmpty) title = val;
+        continue;
+      }
+      if (line.startsWith('【目安時間・費用】')) {
+        section = 'meta';
+        final val = line.replaceFirst('【目安時間・費用】', '').trim();
+        final parts = val.split(RegExp(r'[/／・]'));
+        if (parts.isNotEmpty) time = parts[0].trim();
+        if (parts.length > 1) cost = parts[1].trim();
+        continue;
+      }
+      if (line.startsWith('【目安時間】')) {
+        section = 'time';
+        final val = line.replaceFirst('【目安時間】', '').trim();
+        if (val.isNotEmpty) time = val;
+        continue;
+      }
+      if (line.startsWith('【目安費用】')) {
+        section = 'cost';
+        final val = line.replaceFirst('【目安費用】', '').trim();
+        if (val.isNotEmpty) cost = val;
+        continue;
+      }
+      if (line.startsWith('【材料')) {
+        section = 'ing';
+        continue;
+      }
+      if (line.startsWith('【作り方') || line.startsWith('【手順')) {
+        section = 'step';
+        continue;
+      }
+      if (line.startsWith('【ポイント') ||
+          line.startsWith('【コツ') ||
+          line.startsWith('【ひとこと') ||
+          line.startsWith('【アレンジ')) {
+        section = 'outro';
+        final after = line.replaceFirst(RegExp(r'^【[^】]*】'), '').trim();
+        if (after.isNotEmpty) outroLines.add(after);
+        continue;
+      }
+
+      if (section == 'intro') {
+        introLines.add(line);
+      } else if (section == 'title') {
+        title = line;
+        section = 'meta';
+      } else if (section == 'time') {
+        time = line;
+        section = 'meta';
+      } else if (section == 'cost') {
+        cost = line;
+        section = 'meta';
+      } else if (section == 'ing') {
         final clean = line.replaceFirst(RegExp(r'^[・\-*•]\s*'), '').trim();
-        if (clean.isNotEmpty) {
-          final sp = clean.split(RegExp(r'[\s :：]+'));
-          final name = sp.first;
-          final amount = sp.length > 1 ? sp.sublist(1).join(' ') : '適量';
+        if (clean.isEmpty) continue;
+        String name = clean;
+        String amount = '適量';
+        if (clean.contains('：') || clean.contains(':')) {
+          final sp = clean.split(RegExp(r'[:：]'));
+          name = sp.first.trim();
+          final rest = sp.sublist(1).join(':').trim();
+          if (rest.isNotEmpty) amount = rest;
+        } else {
+          final sp = clean.split(RegExp(r'[\s ]+'));
+          if (sp.length >= 2) {
+            amount = sp.last.trim();
+            name = sp.sublist(0, sp.length - 1).join(' ').trim();
+          }
+        }
+        if (name.isNotEmpty) {
           ingredientsData.add({'name': name, 'amount': amount});
         }
-      } else if (currentSection == 'step') {
+      } else if (section == 'step') {
         stepsLines.add(line);
+      } else if (section == 'outro') {
+        outroLines.add(line);
       }
     }
 
     return {
-      'isRecipe': true,
+      'isRecipe': ingredientsData.isNotEmpty || stepsLines.isNotEmpty,
+      'intro': introLines.join('\n').trim(),
+      'outro': outroLines.join('\n').trim(),
       'title': title,
       'subCategory': 'レシピ',
-      'time': time,
-      'cost': cost,
+      'time': time.isNotEmpty ? time : '約10分',
+      'cost': cost.isNotEmpty ? cost : '約200円',
       'ingredients': ingredientsData,
       'steps': stepsLines.join('\n'),
     };
   }
 
-  Future _saveAiSuggestion(int index, String suggestionText) async {
-    if (_currentUserId.isEmpty) return;
-    if (_savedMessageIndexes.contains(index)) return;
+  Future _askAiSubstitution({
+    required String dishTitle,
+    required List allIngredients,
+    String? targetIngredient,
+  }) async {
+    final currentKey = AiChatScreen.apiKey.trim();
+    if (currentKey.isEmpty || currentKey.contains('ここに')) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('APIキーを設定してください')));
+      return;
+    }
 
-    final messenger = ScaffoldMessenger.of(context);
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text('AIが代用・アレンジ案を考えています...')),
+          ],
+        ),
+      ),
+    );
+
+    final ingNames = allIngredients
+        .where((e) => e is Map)
+        .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}'.trim())
+        .join('、');
+    final missingText = _missingAppliances.isEmpty
+        ? '特になし'
+        : _missingAppliances.join('、');
+
+    final prompt = targetIngredient != null
+        ? '料理「$dishTitle」（材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
+              '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
+        : '料理「$dishTitle」（材料：$ingNames）について、\n'
+              '持っていない調理家電【$missingText】を使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
+
+    String replyText = '代用案を取得できませんでした。もう一度お試しください。';
+
+    for (final modelName in AiChatScreen.fallbackModels) {
+      try {
+        final model = GenerativeModel(
+          model: modelName.toString(),
+          apiKey: currentKey,
+        );
+        final res = await model
+            .generateContent([Content.text(prompt)])
+            .timeout(const Duration(seconds: 20));
+        if (res.text != null && res.text!.trim().isNotEmpty) {
+          replyText = res.text!
+              .replaceAll('**', '')
+              .replaceAll('##', '')
+              .trim();
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pop();
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.auto_awesome, color: Colors.orange),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                targetIngredient != null
+                    ? '「$targetIngredient」の代用案'
+                    : '「$dishTitle」のAI代替提案',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text(
+            replyText,
+            style: const TextStyle(fontSize: 15, height: 1.5),
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future _toggleSaveAiSuggestion(int index, String suggestionText) async {
+    if (_currentUserId.isEmpty) return;
+
+    final existingDocId = _savedDocIdByIndex[index]?.toString() ?? '';
+    if (existingDocId.isNotEmpty) {
+      setState(() {
+        _savedDocIdByIndex.remove(index);
+      });
+      try {
+        await FirebaseFirestore.instance
+            .collection('posts')
+            .doc(existingDocId)
+            .delete();
+        if (mounted) {
+          showReactionToast(context, 'savedUsers', added: false);
+        }
+      } catch (e) {}
+      return;
+    }
+
     final parsed = _parseAiSuggestion(suggestionText);
     final bool isRecipe = parsed['isRecipe'] == true;
     final String title = parsed['title'].toString();
     final String subCategory = parsed['subCategory'].toString();
 
     setState(() {
-      _savedMessageIndexes.add(index);
+      _savedDocIdByIndex[index] = 'pending';
     });
 
     try {
-      await FirebaseFirestore.instance.collection('posts').add({
+      final docRef = await FirebaseFirestore.instance.collection('posts').add({
         'userId': _currentUserId,
         'userName': 'AIアドバイザー',
         'mainCategory': 'AI',
         'subCategory': subCategory,
         'title': title,
         'content': suggestionText,
-        'imageUrl': '',
+        'hasImage': false,
+        'imageBase64': '',
+        'imagesBase64': [],
         'isRecipePost': isRecipe,
         'recipeTime': parsed['time'],
         'recipeCost': parsed['cost'],
@@ -1186,22 +1324,231 @@ class _AiChatScreenState extends State {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            isRecipe
-                ? 'レシピ「$title」を保存フォルダに追加しました！'
-                : 'アドバイス「$title」を保存フォルダに追加しました！',
-          ),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _savedMessageIndexes.remove(index);
+        _savedDocIdByIndex[index] = docRef.id;
       });
-      messenger.showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
+      showReactionToast(context, 'savedUsers', added: true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _savedDocIdByIndex.remove(index);
+      });
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
     }
+  }
+
+  Widget _buildInlineRecipeCard(int messageIndex, Map parsed) {
+    final String title = (parsed['title'] ?? 'AI提案レシピ').toString();
+    final String recipeTime = (parsed['time'] ?? '').toString();
+    final String rawCost = (parsed['cost'] ?? '').toString();
+    final List ingredients = parsed['ingredients'] is List
+        ? List.from(parsed['ingredients'])
+        : [];
+    final String steps = (parsed['steps'] ?? '').toString();
+
+    final int currentServings = (_servingsByIndex[messageIndex] as int?) ?? 1;
+    final String scaledCost = _scaleAmountString(rawCost, 1, currentServings);
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8, bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.restaurant_menu, size: 18, color: Colors.orange),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _askAiSubstitution(
+                  dishTitle: title,
+                  allIngredients: ingredients,
+                ),
+                icon: const Icon(
+                  Icons.auto_awesome,
+                  size: 13,
+                  color: Colors.orange,
+                ),
+                label: const Text(
+                  'AI代替提案',
+                  style: TextStyle(fontSize: 11, color: Colors.orange),
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.orange),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              if (recipeTime.isNotEmpty)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.schedule, size: 15, color: Colors.black54),
+                    const SizedBox(width: 4),
+                    Text(recipeTime, style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              if (scaledCost.isNotEmpty)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.payments_outlined,
+                      size: 15,
+                      color: Colors.green,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$scaledCost（$currentServings人分）',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.green,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+          if (ingredients.isNotEmpty) ...[
+            const Divider(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '材料（$currentServings人分）',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline, size: 18),
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(4),
+                      onPressed: currentServings > 1
+                          ? () {
+                              setState(() {
+                                _servingsByIndex[messageIndex] =
+                                    currentServings - 1;
+                              });
+                            }
+                          : null,
+                    ),
+                    Text(
+                      '$currentServings人分',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline, size: 18),
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(4),
+                      onPressed: currentServings < 6
+                          ? () {
+                              setState(() {
+                                _servingsByIndex[messageIndex] =
+                                    currentServings + 1;
+                              });
+                            }
+                          : null,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            for (final rawIng in ingredients)
+              Builder(
+                builder: (_) {
+                  final ingMap = rawIng as Map;
+                  final name = (ingMap['name'] ?? '').toString();
+                  final rawAmt = (ingMap['amount'] ?? '').toString();
+                  final scaledAmt = _scaleAmountString(
+                    rawAmt,
+                    1,
+                    currentServings,
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '・$name : $scaledAmt',
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => _askAiSubstitution(
+                            dishTitle: title,
+                            allIngredients: ingredients,
+                            targetIngredient: name,
+                          ),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text(
+                            'AI代用案',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+          ],
+          if (steps.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            const Text(
+              '作り方',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            Text(steps, style: const TextStyle(fontSize: 13, height: 1.45)),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _buildReferencedPostCard(Map post) {
@@ -1461,7 +1808,13 @@ class _AiChatScreenState extends State {
                     ? msg['imageBytes'] as Uint8List
                     : null;
                 final List referencedPosts = _toMapList(msg['referencedPosts']);
-                final bool isSaved = _savedMessageIndexes.contains(index);
+                final bool isSaved = _savedDocIdByIndex.containsKey(index);
+                final Map parsed = !isUser
+                    ? _parseAiSuggestion(text)
+                    : {'isRecipe': false};
+                final bool isRecipeMsg = !isUser && parsed['isRecipe'] == true;
+                final String introText = (parsed['intro'] ?? '').toString();
+                final String outroText = (parsed['outro'] ?? '').toString();
 
                 return Align(
                   alignment: isUser
@@ -1470,7 +1823,7 @@ class _AiChatScreenState extends State {
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 12),
                     constraints: BoxConstraints(
-                      maxWidth: MediaQuery.of(context).size.width * 0.86,
+                      maxWidth: MediaQuery.of(context).size.width * 0.88,
                     ),
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
@@ -1501,18 +1854,39 @@ class _AiChatScreenState extends State {
                               ),
                             ),
                           ),
-                        Text(
-                          text,
-                          style: TextStyle(
-                            color: isUser ? Colors.white : Colors.black87,
-                            fontSize: 15,
-                            height: 1.5,
+                        if (isRecipeMsg) ...[
+                          if (introText.isNotEmpty)
+                            Text(
+                              introText,
+                              style: const TextStyle(
+                                color: Colors.black87,
+                                fontSize: 15,
+                                height: 1.5,
+                              ),
+                            ),
+                          _buildInlineRecipeCard(index, parsed),
+                          if (outroText.isNotEmpty)
+                            Text(
+                              outroText,
+                              style: const TextStyle(
+                                color: Colors.black87,
+                                fontSize: 14,
+                                height: 1.5,
+                              ),
+                            ),
+                        ] else
+                          Text(
+                            text,
+                            style: TextStyle(
+                              color: isUser ? Colors.white : Colors.black87,
+                              fontSize: 15,
+                              height: 1.5,
+                            ),
                           ),
-                        ),
                         if (!isUser && referencedPosts.isNotEmpty) ...[
                           const SizedBox(height: 10),
                           Text(
-                            '📌 参考になったみんなの投稿',
+                            '📌 関連するみんなの投稿',
                             style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
@@ -1543,21 +1917,24 @@ class _AiChatScreenState extends State {
                           Align(
                             alignment: Alignment.centerRight,
                             child: TextButton.icon(
-                              onPressed: isSaved
-                                  ? null
-                                  : () => _saveAiSuggestion(index, text),
+                              onPressed: () =>
+                                  _toggleSaveAiSuggestion(index, text),
                               icon: Icon(
                                 isSaved
-                                    ? Icons.bookmark_added
+                                    ? Icons.bookmark
                                     : Icons.bookmark_add_outlined,
-                                size: 16,
-                                color: isSaved ? Colors.grey : Colors.blue,
+                                size: 17,
+                                color: Colors.blue,
                               ),
                               label: Text(
-                                isSaved ? '保存済み' : '保存フォルダに追加',
-                                style: TextStyle(
+                                isSaved
+                                    ? '保存フォルダに保存済み（解除）'
+                                    : (isRecipeMsg
+                                          ? 'このレシピを保存フォルダへ'
+                                          : '保存フォルダに追加'),
+                                style: const TextStyle(
                                   fontSize: 12,
-                                  color: isSaved ? Colors.grey : Colors.blue,
+                                  color: Colors.blue,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -1643,7 +2020,7 @@ class _AiChatScreenState extends State {
                       minLines: 1,
                       maxLines: 4,
                       decoration: InputDecoration(
-                        hintText: '料理・掃除・節約など何でも相談...',
+                        hintText: '余り物・レシピ・掃除・節約など何でも相談...',
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 14,
                           vertical: 10,
