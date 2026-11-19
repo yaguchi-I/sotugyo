@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
+import '../services/ai_knowledge_service.dart';
 import 'ai_chat_screen.dart';
 import 'sns_reply_screen.dart';
 import 'sns_detail_screen.dart';
@@ -19,7 +20,12 @@ class SnsScreen extends StatefulWidget {
   State createState() => _SnsScreenState();
 }
 
-class _SnsScreenState extends State {
+class _SnsScreenState extends State with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  final ScrollController _recommendScrollCtrl = ScrollController();
+  final ScrollController _latestScrollCtrl = ScrollController();
+  bool _showScrollToTop = false;
+
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
   final String currentEmailPrefix =
       (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
@@ -29,6 +35,81 @@ class _SnsScreenState extends State {
   final Map _servingsPerPost = {};
   final Map _postImageCache = {};
   final Map _userIconCache = {};
+  final Set _viewedPostIds = Set();
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(_updateScrollToTopVisibility);
+    _recommendScrollCtrl.addListener(_updateScrollToTopVisibility);
+    _latestScrollCtrl.addListener(_updateScrollToTopVisibility);
+  }
+
+  @override
+  void dispose() {
+    _tabController.removeListener(_updateScrollToTopVisibility);
+    _recommendScrollCtrl.removeListener(_updateScrollToTopVisibility);
+    _latestScrollCtrl.removeListener(_updateScrollToTopVisibility);
+    _tabController.dispose();
+    _recommendScrollCtrl.dispose();
+    _latestScrollCtrl.dispose();
+    super.dispose();
+  }
+
+  ScrollController get _activeScrollController =>
+      _tabController.index == 0 ? _recommendScrollCtrl : _latestScrollCtrl;
+
+  void _updateScrollToTopVisibility() {
+    final ctrl = _activeScrollController;
+    final bool shouldShow = ctrl.hasClients && ctrl.offset > 300;
+    if (shouldShow != _showScrollToTop && mounted) {
+      setState(() {
+        _showScrollToTop = shouldShow;
+      });
+    }
+  }
+
+  void _scrollToTop() {
+    final ctrl = _activeScrollController;
+    if (ctrl.hasClients) {
+      ctrl.animateTo(
+        0,
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  void _recordImpressionOnce(
+    String docId,
+    int likes,
+    int helpfuls,
+    int saves,
+    int replies,
+    int currentImpressions,
+  ) {
+    if (docId.isEmpty || _viewedPostIds.contains(docId)) return;
+    _viewedPostIds.add(docId);
+
+    final nextImpressions = currentImpressions + 1;
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: likes,
+      helpfuls: helpfuls,
+      saves: saves,
+      replies: replies,
+      impressions: nextImpressions,
+    );
+
+    FirebaseFirestore.instance
+        .collection('posts')
+        .doc(docId)
+        .update({
+          'impressions': FieldValue.increment(1),
+          'valueScore': nextScore,
+        })
+        .catchError((_) {});
+  }
 
   Uint8List? _decodeAndCache(String cacheKey, String? rawBase64, Map cacheMap) {
     if (rawBase64 == null || rawBase64.trim().isEmpty) return null;
@@ -84,15 +165,9 @@ class _SnsScreenState extends State {
   }
 
   int _readReactionCount(dynamic rawCount, List fallbackList) {
-    int? parsedCount;
-    if (rawCount is num) {
-      parsedCount = rawCount.toInt();
-    } else if (rawCount != null) {
-      parsedCount = int.tryParse(rawCount.toString().trim());
-    }
-    if (parsedCount != null) {
-      final safeVal = parsedCount < 0 ? 0 : parsedCount;
-      return max(safeVal, fallbackList.length);
+    final parsed = AiKnowledgeService.readIntField(rawCount, -1);
+    if (rawCount != null && parsed >= 0) {
+      return max(parsed, fallbackList.length);
     }
     return fallbackList.length;
   }
@@ -265,45 +340,208 @@ class _SnsScreenState extends State {
     );
   }
 
-  Future _toggleReaction(
-    String docId,
-    String listField,
-    String countField,
-    List currentUsers,
-    int currentDisplayCount,
-  ) async {
+  Future _sendReactionNotification({
+    required String targetUserId,
+    required String postId,
+    required String postSummary,
+    required String type,
+  }) async {
+    if (currentUserId.isEmpty ||
+        targetUserId.isEmpty ||
+        targetUserId == currentUserId) {
+      return;
+    }
+
+    try {
+      String fromName = FirebaseAuth.instance.currentUser?.displayName ?? '';
+      String fromIcon = '';
+      final uDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUserId)
+          .get();
+      if (uDoc.exists && uDoc.data() != null) {
+        final uData = uDoc.data()!;
+        if (uData['userName'] != null &&
+            uData['userName'].toString().trim().isNotEmpty) {
+          fromName = uData['userName'].toString().trim();
+        }
+        if (uData['iconBase64'] != null) {
+          fromIcon = uData['iconBase64'].toString();
+        }
+      }
+      if (fromName.isEmpty) {
+        fromName = currentEmailPrefix.isNotEmpty ? currentEmailPrefix : 'ユーザー';
+      }
+
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'targetUserId': targetUserId,
+        'fromUserId': currentUserId,
+        'fromUserName': fromName,
+        'fromUserIconBase64': fromIcon,
+        'postId': postId,
+        'postSummary': postSummary,
+        'type': type,
+        'isRead': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {}
+  }
+
+  Future _toggleReaction({
+    required String docId,
+    required String listField,
+    required String countField,
+    required List currentUsers,
+    required int likesCount,
+    required int helpfulsCount,
+    required int savesCount,
+    required int repliesCount,
+    required int impressionsCount,
+    required String postOwnerUid,
+    required String postSummary,
+  }) async {
     if (currentUserId.isEmpty) return;
     final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
     final isAdded = currentUsers.contains(currentUserId);
 
+    int nextLikes = likesCount;
+    int nextHelpfuls = helpfulsCount;
+    int nextSaves = savesCount;
+
+    if (countField == 'likes') {
+      nextLikes = isAdded ? max(0, likesCount - 1) : likesCount + 1;
+    } else if (countField == 'helpfuls') {
+      nextHelpfuls = isAdded ? max(0, helpfulsCount - 1) : helpfulsCount + 1;
+    } else if (countField == 'saves') {
+      nextSaves = isAdded ? max(0, savesCount - 1) : savesCount + 1;
+    }
+
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: nextLikes,
+      helpfuls: nextHelpfuls,
+      saves: nextSaves,
+      replies: repliesCount,
+      impressions: impressionsCount,
+    );
+
+    final int nextTargetCount = countField == 'likes'
+        ? nextLikes
+        : (countField == 'helpfuls' ? nextHelpfuls : nextSaves);
+
     try {
-      if (isAdded) {
-        final nextCount = currentDisplayCount > 0 ? currentDisplayCount - 1 : 0;
-        await docRef.update({
-          listField: FieldValue.arrayRemove([currentUserId]),
-          countField: nextCount,
-        });
-      } else {
-        final nextCount = currentDisplayCount + 1;
-        await docRef.update({
-          listField: FieldValue.arrayUnion([currentUserId]),
-          countField: nextCount,
-        });
+      await docRef.update({
+        listField: isAdded
+            ? FieldValue.arrayRemove([currentUserId])
+            : FieldValue.arrayUnion([currentUserId]),
+        countField: nextTargetCount,
+        'valueScore': nextScore,
+      });
+
+      if (!isAdded && (countField == 'likes' || countField == 'helpfuls')) {
+        _sendReactionNotification(
+          targetUserId: postOwnerUid,
+          postId: docId,
+          postSummary: postSummary,
+          type: countField == 'likes' ? 'like' : 'helpful',
+        );
       }
     } catch (e) {}
+  }
+
+  Future _runBackfillDialog() async {
+    final confirm = await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.auto_fix_high, color: Colors.deepPurple),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '過去投稿のAIタグ＆スコア一括整理',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          '既存のすべての投稿をAIで解析し、検索用タグ（aiTags）・価格帯（priceTier）・評価スコア（valueScore）を一括更新します。実行しますか？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('キャンセル'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.deepPurple,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('一括整理を実行'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    final ValueNotifier progressText = ValueNotifier('準備中...');
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: ValueListenableBuilder(
+          valueListenable: progressText,
+          builder: (_, val, __) {
+            return Row(
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(width: 16),
+                Expanded(child: Text(val.toString())),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+
+    try {
+      final count = await AiKnowledgeService.backfillAllExistingPosts(
+        onProgress: (current, total) {
+          progressText.value = 'AI解析＆DB整理中... ($current / $total 件)';
+        },
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('🛠️ $count 件の投稿をAI検索対応へ整理しました！')));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('一括整理に失敗しました: $e')));
+    }
   }
 
   Future _showDeveloperEditCountsDialog({
     required String docId,
     required int currentLikes,
     required int currentHelpfuls,
+    required int currentSaves,
     required int currentReplies,
+    required int currentImpressions,
   }) async {
     final likesCtrl = TextEditingController(text: currentLikes.toString());
     final helpfulsCtrl = TextEditingController(
       text: currentHelpfuls.toString(),
     );
+    final savesCtrl = TextEditingController(text: currentSaves.toString());
     final repliesCtrl = TextEditingController(text: currentReplies.toString());
+    final impressionsCtrl = TextEditingController(
+      text: currentImpressions.toString(),
+    );
     final messenger = ScaffoldMessenger.of(context);
 
     final saved = await showDialog(
@@ -316,7 +554,7 @@ class _SnsScreenState extends State {
               SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '開発者専用：数値の変更',
+                  '開発者専用：数値・スコア変更',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                 ),
               ),
@@ -340,21 +578,39 @@ class _SnsScreenState extends State {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 TextField(
                   controller: helpfulsCtrl,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
-                    labelText: '💡 役立った・電球数 (helpfuls)',
+                    labelText: '💡 参考になった数 (helpfuls)',
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: savesCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '🔖 保存数 (saves)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 TextField(
                   controller: repliesCtrl,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
                     labelText: '💬 返信数 (replies)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: impressionsCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '👁️ インプレッション数 (impressions)',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -372,7 +628,7 @@ class _SnsScreenState extends State {
                 backgroundColor: Colors.deepPurple,
                 foregroundColor: Colors.white,
               ),
-              child: const Text('保存する'),
+              child: const Text('保存してスコア再計算'),
             ),
           ],
         );
@@ -380,24 +636,46 @@ class _SnsScreenState extends State {
     );
 
     if (saved == true) {
-      final newLikes = int.tryParse(likesCtrl.text.trim()) ?? currentLikes;
-      final newHelpfuls =
-          int.tryParse(helpfulsCtrl.text.trim()) ?? currentHelpfuls;
-      final newReplies =
-          int.tryParse(repliesCtrl.text.trim()) ?? currentReplies;
+      final newLikes = max(
+        0,
+        int.tryParse(likesCtrl.text.trim()) ?? currentLikes,
+      );
+      final newHelpfuls = max(
+        0,
+        int.tryParse(helpfulsCtrl.text.trim()) ?? currentHelpfuls,
+      );
+      final newSaves = max(
+        0,
+        int.tryParse(savesCtrl.text.trim()) ?? currentSaves,
+      );
+      final newReplies = max(
+        0,
+        int.tryParse(repliesCtrl.text.trim()) ?? currentReplies,
+      );
+      final newImpressions = max(
+        0,
+        int.tryParse(impressionsCtrl.text.trim()) ?? currentImpressions,
+      );
+
+      final newValueScore = AiKnowledgeService.calculateValueScore(
+        likes: newLikes,
+        helpfuls: newHelpfuls,
+        saves: newSaves,
+        replies: newReplies,
+        impressions: newImpressions,
+      );
 
       try {
         await FirebaseFirestore.instance.collection('posts').doc(docId).update({
-          'likes': newLikes < 0 ? 0 : newLikes,
-          'helpfuls': newHelpfuls < 0 ? 0 : newHelpfuls,
-          'replies': newReplies < 0 ? 0 : newReplies,
+          'likes': newLikes,
+          'helpfuls': newHelpfuls,
+          'saves': newSaves,
+          'replies': newReplies,
+          'impressions': newImpressions,
+          'valueScore': newValueScore,
         });
         messenger.showSnackBar(
-          SnackBar(
-            content: Text(
-              '🛠️ いいね:$newLikes / 電球:$newHelpfuls / 返信:$newReplies に更新しました！',
-            ),
-          ),
+          SnackBar(content: Text('🛠️ 更新完了！ valueScore: $newValueScore')),
         );
       } catch (e) {
         messenger.showSnackBar(SnackBar(content: Text('更新に失敗しました: $e')));
@@ -487,6 +765,44 @@ class _SnsScreenState extends State {
     messenger.showSnackBar(SnackBar(content: Text('$displayName さんをブロックしました')));
   }
 
+  void _openPostInAiChat(String docId, Map post, String displayUserName) {
+    final title = (post['title'] ?? '').toString();
+    final content = (post['content'] ?? '').toString();
+    final preview = title.isNotEmpty ? title : content;
+    final shortPreview = preview.length > 36
+        ? '${preview.substring(0, 36)}...'
+        : preview;
+
+    final Map lightweightContext = {
+      'docId': docId,
+      'userName': displayUserName,
+      'mainCategory': (post['mainCategory'] ?? '').toString(),
+      'subCategory': (post['subCategory'] ?? '').toString(),
+      'title': title,
+      'content': content,
+      'recipeCost': (post['recipeCost'] ?? '').toString(),
+      'recipeIngredients': post['recipeIngredients'] is List
+          ? List.from(post['recipeIngredients'])
+          : const [],
+      'recipeSteps': (post['recipeSteps'] ?? '').toString(),
+      'helpfuls': AiKnowledgeService.readIntField(post['helpfuls']),
+      'saves': AiKnowledgeService.readIntField(post['saves']),
+      'likes': AiKnowledgeService.readIntField(post['likes']),
+      'priceTier': (post['priceTier'] ?? 'none').toString(),
+    };
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AiChatScreen(
+          initialPrompt:
+              'タイムラインの「$shortPreview」という投稿が気になっています。私の家電状況や一人暮らし向けにアレンジ・実践するコツを教えて！',
+          referencedPost: lightweightContext,
+        ),
+      ),
+    );
+  }
+
   void _showPostOptions({
     required String docId,
     required bool isMyPost,
@@ -496,7 +812,10 @@ class _SnsScreenState extends State {
     required String displayUserName,
     required int currentLikes,
     required int currentHelpfuls,
+    required int currentSaves,
     required int currentReplies,
+    required int currentImpressions,
+    required double currentValueScore,
   }) {
     showModalBottomSheet(
       context: context,
@@ -511,14 +830,14 @@ class _SnsScreenState extends State {
                     color: Colors.deepPurple,
                   ),
                   title: const Text(
-                    '🛠️ [開発者専用] いいね・電球・返信数を変更する',
+                    '🛠️ [開発者専用] 数値・インプ・スコアを変更する',
                     style: TextStyle(
                       color: Colors.deepPurple,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                   subtitle: Text(
-                    '現在の値 → いいね:$currentLikes / 電球:$currentHelpfuls / 返信:$currentReplies',
+                    '♥$currentLikes / 💡$currentHelpfuls / 🔖$currentSaves / 👁$currentImpressions / Score:${currentValueScore.toStringAsFixed(1)}',
                     style: const TextStyle(fontSize: 12),
                   ),
                   onTap: () {
@@ -527,7 +846,9 @@ class _SnsScreenState extends State {
                       docId: docId,
                       currentLikes: currentLikes,
                       currentHelpfuls: currentHelpfuls,
+                      currentSaves: currentSaves,
                       currentReplies: currentReplies,
+                      currentImpressions: currentImpressions,
                     );
                   },
                 ),
@@ -599,172 +920,286 @@ class _SnsScreenState extends State {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        backgroundColor: Colors.grey.shade100,
-        appBar: AppBar(
-          backgroundColor: Colors.white,
-          leading: IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () {
-              Scaffold.of(context).openDrawer();
-            },
-          ),
-          title: GestureDetector(
-            onLongPress: () {
-              setState(() {
-                _isDeveloper = !_isDeveloper;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(_isDeveloper ? '🛠️ 開発者モード：ON' : '開発者モード：OFF'),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            },
-            child: const Text(
-              'タイムライン',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-          bottom: const TabBar(
-            labelColor: Colors.blue,
-            unselectedLabelColor: Colors.grey,
-            indicatorColor: Colors.blue,
-            labelStyle: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-            tabs: [
-              Tab(text: 'おすすめ'),
-              Tab(text: '最新'),
-            ],
-          ),
-        ),
-        body: StreamBuilder(
-          stream: currentUserId.isNotEmpty
-              ? FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(currentUserId)
-                    .snapshots()
-              : null,
-          builder: (context, userPrefSnap) {
-            List interestedTags = [];
-            List lessInterestedTopics = [];
-            List blockedUsers = [];
-            List missingAppliances = [];
+  Widget _buildNotificationButton() {
+    if (currentUserId.isEmpty) {
+      return IconButton(
+        tooltip: '通知',
+        icon: const Icon(Icons.notifications_outlined),
+        onPressed: () {},
+      );
+    }
 
-            if (userPrefSnap.hasData && userPrefSnap.data != null) {
-              final uDoc = userPrefSnap.data as DocumentSnapshot;
-              if (uDoc.exists && uDoc.data() != null) {
-                final uData = uDoc.data() as Map;
-                if (uData['interestedTags'] != null) {
-                  interestedTags = List.from(uData['interestedTags']);
-                }
-                if (uData['lessInterestedTopics'] != null) {
-                  lessInterestedTopics = List.from(
-                    uData['lessInterestedTopics'],
-                  );
-                }
-                if (uData['blockedUsers'] != null) {
-                  blockedUsers = List.from(uData['blockedUsers']);
-                }
-                if (uData['missingAppliances'] != null) {
-                  missingAppliances = List.from(uData['missingAppliances']);
-                }
-              }
+    return StreamBuilder(
+      stream: FirebaseFirestore.instance
+          .collection('notifications')
+          .where('targetUserId', isEqualTo: currentUserId)
+          .snapshots(),
+      builder: (context, snap) {
+        int unreadCount = 0;
+        if (snap.hasData && snap.data != null) {
+          final docs = (snap.data as QuerySnapshot).docs;
+          for (final d in docs) {
+            final data = d.data() as Map;
+            if (data['isRead'] != true) {
+              unreadCount++;
             }
+          }
+        }
 
-            return StreamBuilder(
-              stream: FirebaseFirestore.instance
-                  .collection('posts')
-                  .orderBy('createdAt', descending: true)
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (!snapshot.hasData || snapshot.data == null) {
-                  return const Center(child: Text('まだ投稿がありません'));
-                }
-
-                final querySnap = snapshot.data as QuerySnapshot;
-                final allDocs = querySnap.docs;
-
-                final List visibleDocs = [];
-                for (final doc in allDocs) {
-                  final data = doc.data() as Map;
-                  if (data['mainCategory'] == 'AI') continue;
-
-                  final List hiddenUsers = data['hiddenUsers'] != null
-                      ? List.from(data['hiddenUsers'])
-                      : [];
-                  if (hiddenUsers.contains(currentUserId)) continue;
-
-                  final List reportedUsers = data['reportedUsers'] != null
-                      ? List.from(data['reportedUsers'])
-                      : [];
-                  if (reportedUsers.length >= 3 ||
-                      reportedUsers.contains(currentUserId)) {
-                    continue;
-                  }
-
-                  final postUid = data['userId']?.toString() ?? '';
-                  final postUName = data['userName']?.toString() ?? '';
-                  if ((postUid.isNotEmpty && blockedUsers.contains(postUid)) ||
-                      (postUName.isNotEmpty &&
-                          blockedUsers.contains(postUName))) {
-                    continue;
-                  }
-
-                  visibleDocs.add(doc);
-                }
-
-                final List recommendedDocs = List.from(visibleDocs);
-                recommendedDocs.sort((a, b) {
-                  final dataA = (a as QueryDocumentSnapshot).data() as Map;
-                  final dataB = (b as QueryDocumentSnapshot).data() as Map;
-                  final scoreA = _calcRecommendScore(
-                    dataA,
-                    interestedTags,
-                    lessInterestedTopics,
-                  );
-                  final scoreB = _calcRecommendScore(
-                    dataB,
-                    interestedTags,
-                    lessInterestedTopics,
-                  );
-                  return scoreB.compareTo(scoreA);
-                });
-
-                return TabBarView(
-                  children: [
-                    _buildFeedList(
-                      docs: recommendedDocs,
-                      isRecommendedTab: true,
-                      interestedTags: interestedTags,
-                      lessInterestedTopics: lessInterestedTopics,
-                      missingAppliances: missingAppliances,
-                    ),
-                    _buildFeedList(
-                      docs: visibleDocs,
-                      isRecommendedTab: false,
-                      interestedTags: interestedTags,
-                      lessInterestedTopics: lessInterestedTopics,
-                      missingAppliances: missingAppliances,
-                    ),
-                  ],
-                );
-              },
+        return IconButton(
+          tooltip: '通知一覧',
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const NotificationScreen()),
             );
           },
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              const Icon(Icons.notifications_outlined),
+              if (unreadCount > 0)
+                Positioned(
+                  right: -4,
+                  top: -4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 16,
+                      minHeight: 16,
+                    ),
+                    child: Text(
+                      unreadCount > 99 ? '99+' : unreadCount.toString(),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        leading: IconButton(
+          icon: const Icon(Icons.menu),
+          onPressed: () {
+            Scaffold.of(context).openDrawer();
+          },
         ),
+        title: GestureDetector(
+          onLongPress: () {
+            setState(() {
+              _isDeveloper = !_isDeveloper;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(_isDeveloper ? '🛠️ 開発者モード：ON' : '開発者モード：OFF'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+          child: const Text(
+            'タイムライン',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+        actions: [
+          if (_isDeveloper)
+            IconButton(
+              tooltip: '過去投稿のAIタグ＆スコア一括整理',
+              icon: const Icon(Icons.auto_fix_high, color: Colors.deepPurple),
+              onPressed: _runBackfillDialog,
+            ),
+          _buildNotificationButton(),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: Colors.blue,
+          unselectedLabelColor: Colors.grey,
+          indicatorColor: Colors.blue,
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 15,
+          ),
+          tabs: const [
+            Tab(text: 'おすすめ'),
+            Tab(text: '最新'),
+          ],
+        ),
+      ),
+      body: Stack(
+        children: [
+          StreamBuilder(
+            stream: currentUserId.isNotEmpty
+                ? FirebaseFirestore.instance
+                      .collection('users')
+                      .doc(currentUserId)
+                      .snapshots()
+                : null,
+            builder: (context, userPrefSnap) {
+              List interestedTags = [];
+              List lessInterestedTopics = [];
+              List blockedUsers = [];
+              List missingAppliances = [];
+
+              if (userPrefSnap.hasData && userPrefSnap.data != null) {
+                final uDoc = userPrefSnap.data as DocumentSnapshot;
+                if (uDoc.exists && uDoc.data() != null) {
+                  final uData = uDoc.data() as Map;
+                  if (uData['interestedTags'] != null) {
+                    interestedTags = List.from(uData['interestedTags']);
+                  }
+                  if (uData['lessInterestedTopics'] != null) {
+                    lessInterestedTopics = List.from(
+                      uData['lessInterestedTopics'],
+                    );
+                  }
+                  if (uData['blockedUsers'] != null) {
+                    blockedUsers = List.from(uData['blockedUsers']);
+                  }
+                  if (uData['missingAppliances'] != null) {
+                    missingAppliances = List.from(uData['missingAppliances']);
+                  }
+                }
+              }
+
+              return StreamBuilder(
+                stream: FirebaseFirestore.instance
+                    .collection('posts')
+                    .orderBy('createdAt', descending: true)
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (!snapshot.hasData || snapshot.data == null) {
+                    return const Center(child: Text('まだ投稿がありません'));
+                  }
+
+                  final querySnap = snapshot.data as QuerySnapshot;
+                  final allDocs = querySnap.docs;
+
+                  final List visibleDocs = [];
+                  for (final doc in allDocs) {
+                    final data = doc.data() as Map;
+                    if (data['mainCategory'] == 'AI') continue;
+
+                    final List hiddenUsers = data['hiddenUsers'] != null
+                        ? List.from(data['hiddenUsers'])
+                        : [];
+                    if (hiddenUsers.contains(currentUserId)) continue;
+
+                    final List reportedUsers = data['reportedUsers'] != null
+                        ? List.from(data['reportedUsers'])
+                        : [];
+                    if (reportedUsers.length >= 3 ||
+                        reportedUsers.contains(currentUserId)) {
+                      continue;
+                    }
+
+                    final postUid = data['userId']?.toString() ?? '';
+                    final postUName = data['userName']?.toString() ?? '';
+                    if ((postUid.isNotEmpty &&
+                            blockedUsers.contains(postUid)) ||
+                        (postUName.isNotEmpty &&
+                            blockedUsers.contains(postUName))) {
+                      continue;
+                    }
+
+                    visibleDocs.add(doc);
+                  }
+
+                  final List recommendedDocs = List.from(visibleDocs);
+                  recommendedDocs.sort((a, b) {
+                    final dataA = (a as QueryDocumentSnapshot).data() as Map;
+                    final dataB = (b as QueryDocumentSnapshot).data() as Map;
+                    final scoreA = _calcRecommendScore(
+                      dataA,
+                      interestedTags,
+                      lessInterestedTopics,
+                    );
+                    final scoreB = _calcRecommendScore(
+                      dataB,
+                      interestedTags,
+                      lessInterestedTopics,
+                    );
+                    if (scoreB != scoreA) {
+                      return scoreB.compareTo(scoreA);
+                    }
+                    final valA = dataA['valueScore'] is num
+                        ? (dataA['valueScore'] as num).toDouble()
+                        : 0.0;
+                    final valB = dataB['valueScore'] is num
+                        ? (dataB['valueScore'] as num).toDouble()
+                        : 0.0;
+                    return valB.compareTo(valA);
+                  });
+
+                  return TabBarView(
+                    controller: _tabController,
+                    children: [
+                      _buildFeedList(
+                        docs: recommendedDocs,
+                        controller: _recommendScrollCtrl,
+                        isRecommendedTab: true,
+                        interestedTags: interestedTags,
+                        lessInterestedTopics: lessInterestedTopics,
+                        missingAppliances: missingAppliances,
+                      ),
+                      _buildFeedList(
+                        docs: visibleDocs,
+                        controller: _latestScrollCtrl,
+                        isRecommendedTab: false,
+                        interestedTags: interestedTags,
+                        lessInterestedTopics: lessInterestedTopics,
+                        missingAppliances: missingAppliances,
+                      ),
+                    ],
+                  );
+                },
+              );
+            },
+          ),
+          if (_showScrollToTop)
+            Positioned(
+              right: 20,
+              bottom: 98,
+              child: FloatingActionButton.small(
+                heroTag: 'scrollToTopBtn',
+                tooltip: '一番上へ戻る',
+                backgroundColor: Colors.blue.shade700,
+                foregroundColor: Colors.white,
+                onPressed: _scrollToTop,
+                child: const Icon(Icons.arrow_upward),
+              ),
+            ),
+        ],
       ),
     );
   }
 
   Widget _buildFeedList({
     required List docs,
+    required ScrollController controller,
     required bool isRecommendedTab,
     required List interestedTags,
     required List lessInterestedTopics,
@@ -807,8 +1242,8 @@ class _SnsScreenState extends State {
                           color: Colors.blue.shade900,
                         ),
                       ),
-                      ...interestedTags.map((t) {
-                        return Padding(
+                      for (final t in interestedTags)
+                        Padding(
                           padding: const EdgeInsets.only(right: 6.0),
                           child: Container(
                             padding: const EdgeInsets.symmetric(
@@ -828,14 +1263,14 @@ class _SnsScreenState extends State {
                               ),
                             ),
                           ),
-                        );
-                      }),
+                        ),
                     ],
                   ),
                 ),
               ),
             Expanded(
               child: ListView.builder(
+                controller: controller,
                 padding: const EdgeInsets.only(bottom: 110),
                 itemCount: docs.length,
                 itemBuilder: (context, index) {
@@ -871,7 +1306,7 @@ class _SnsScreenState extends State {
   }
 
   Widget _buildPostCard({
-    required dynamic post,
+    required Map post,
     required String docId,
     required BuildContext context,
     required String topicKey,
@@ -902,6 +1337,27 @@ class _SnsScreenState extends State {
       helpfulUsers,
     );
     final int savesCount = _readReactionCount(post['saves'], savedUsers);
+    final int impressionsCount = AiKnowledgeService.readIntField(
+      post['impressions'],
+    );
+    final double valueScore = post['valueScore'] is num
+        ? (post['valueScore'] as num).toDouble()
+        : AiKnowledgeService.calculateValueScore(
+            likes: likesCount,
+            helpfuls: helpfulsCount,
+            saves: savesCount,
+            replies: replies,
+            impressions: impressionsCount,
+          );
+
+    _recordImpressionOnce(
+      docId,
+      likesCount,
+      helpfulsCount,
+      savesCount,
+      replies,
+      impressionsCount,
+    );
 
     final String postUserId = post['userId']?.toString() ?? '';
     final String rawUserName = post['userName']?.toString() ?? '名無し';
@@ -915,6 +1371,10 @@ class _SnsScreenState extends State {
     final String targetUserKey = postUserId.isNotEmpty
         ? postUserId
         : rawUserName;
+
+    final String postSummary = (post['title']?.toString().isNotEmpty == true)
+        ? post['title'].toString()
+        : (post['content']?.toString() ?? '');
 
     final List postImages = _extractPostImages(docId, post);
 
@@ -1097,7 +1557,10 @@ class _SnsScreenState extends State {
                         displayUserName: displayUserName,
                         currentLikes: likesCount,
                         currentHelpfuls: helpfulsCount,
+                        currentSaves: savesCount,
                         currentReplies: replies,
+                        currentImpressions: impressionsCount,
+                        currentValueScore: valueScore,
                       ),
                     ),
                   ],
@@ -1234,51 +1697,59 @@ class _SnsScreenState extends State {
                           ],
                         ),
                         const SizedBox(height: 4),
-                        ...recipeIngredients.map((rawIng) {
-                          final ingMap = rawIng as Map;
-                          final name = ingMap['name']?.toString() ?? '';
-                          final rawAmt = ingMap['amount']?.toString() ?? '';
-                          final scaledAmt = _scaleAmountString(
-                            rawAmt,
-                            baseServings,
-                            currentServings,
-                          );
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2.0),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    '・$name : $scaledAmt',
-                                    style: const TextStyle(fontSize: 13),
-                                  ),
+                        for (final rawIng in recipeIngredients)
+                          Builder(
+                            builder: (_) {
+                              final ingMap = rawIng as Map;
+                              final name = ingMap['name']?.toString() ?? '';
+                              final rawAmt = ingMap['amount']?.toString() ?? '';
+                              final scaledAmt = _scaleAmountString(
+                                rawAmt,
+                                baseServings,
+                                currentServings,
+                              );
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 2.0,
                                 ),
-                                TextButton(
-                                  onPressed: () => _askAiIngredientSubstitution(
-                                    dishTitle:
-                                        post['title']?.toString() ?? 'レシピ',
-                                    targetIngredient: name,
-                                    allIngredients: recipeIngredients,
-                                    missingAppliances: missingAppliances,
-                                  ),
-                                  style: TextButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 6,
-                                      vertical: 2,
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '・$name : $scaledAmt',
+                                        style: const TextStyle(fontSize: 13),
+                                      ),
                                     ),
-                                    minimumSize: Size.zero,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  child: const Text(
-                                    'AI代用案',
-                                    style: TextStyle(fontSize: 11),
-                                  ),
+                                    TextButton(
+                                      onPressed: () =>
+                                          _askAiIngredientSubstitution(
+                                            dishTitle:
+                                                post['title']?.toString() ??
+                                                'レシピ',
+                                            targetIngredient: name,
+                                            allIngredients: recipeIngredients,
+                                            missingAppliances:
+                                                missingAppliances,
+                                          ),
+                                      style: TextButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        minimumSize: Size.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                      child: const Text(
+                                        'AI代用案',
+                                        style: TextStyle(fontSize: 11),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                              ],
-                            ),
-                          );
-                        }),
+                              );
+                            },
+                          ),
                         if (recipeSteps.isNotEmpty) ...[
                           const SizedBox(height: 8),
                           const Text(
@@ -1331,11 +1802,17 @@ class _SnsScreenState extends State {
                       color: isLiked ? Colors.pink : Colors.grey,
                       count: likesCount,
                       onTap: () => _toggleReaction(
-                        docId,
-                        'likedUsers',
-                        'likes',
-                        likedUsers,
-                        likesCount,
+                        docId: docId,
+                        listField: 'likedUsers',
+                        countField: 'likes',
+                        currentUsers: likedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
+                        postOwnerUid: postUserId,
+                        postSummary: postSummary,
                       ),
                     ),
                     _buildActionButton(
@@ -1345,24 +1822,43 @@ class _SnsScreenState extends State {
                       color: isHelpful ? Colors.orange : Colors.grey,
                       count: helpfulsCount,
                       onTap: () => _toggleReaction(
-                        docId,
-                        'helpfulUsers',
-                        'helpfuls',
-                        helpfulUsers,
-                        helpfulsCount,
+                        docId: docId,
+                        listField: 'helpfulUsers',
+                        countField: 'helpfuls',
+                        currentUsers: helpfulUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
+                        postOwnerUid: postUserId,
+                        postSummary: postSummary,
                       ),
                     ),
                     _buildActionButton(
                       icon: isSaved ? Icons.bookmark : Icons.bookmark_border,
                       color: isSaved ? Colors.blue : Colors.grey,
-                      count: 0,
+                      count: savesCount,
                       onTap: () => _toggleReaction(
-                        docId,
-                        'savedUsers',
-                        'saves',
-                        savedUsers,
-                        savesCount,
+                        docId: docId,
+                        listField: 'savedUsers',
+                        countField: 'saves',
+                        currentUsers: savedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
+                        postOwnerUid: postUserId,
+                        postSummary: postSummary,
                       ),
+                    ),
+                    _buildActionButton(
+                      icon: Icons.auto_awesome_outlined,
+                      color: Colors.teal,
+                      count: 0,
+                      onTap: () =>
+                          _openPostInAiChat(docId, post, displayUserName),
                     ),
                   ],
                 ),
@@ -1384,18 +1880,236 @@ class _SnsScreenState extends State {
       onTap: onTap,
       borderRadius: BorderRadius.circular(20),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+        padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
         child: Row(
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(width: 4),
-            Text(
-              count != 0 ? count.toString() : '',
-              style: TextStyle(color: color, fontWeight: FontWeight.bold),
-            ),
+            Icon(icon, color: color, size: 21),
+            if (count > 0) ...[
+              const SizedBox(width: 4),
+              Text(
+                count.toString(),
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ],
           ],
         ),
       ),
+    );
+  }
+}
+
+class NotificationScreen extends StatelessWidget {
+  const NotificationScreen({super.key});
+
+  Future _markAllAsRead(String uid) async {
+    if (uid.isEmpty) return;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('notifications')
+          .where('targetUserId', isEqualTo: uid)
+          .get();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final d in snap.docs) {
+        final data = d.data();
+        if (data['isRead'] != true) {
+          batch.update(d.reference, {'isRead': true});
+        }
+      }
+      await batch.commit();
+    } catch (e) {}
+  }
+
+  String _formatTimestamp(dynamic rawTs) {
+    if (rawTs is Timestamp) {
+      final dt = rawTs.toDate();
+      final m = dt.month.toString().padLeft(2, '0');
+      final d = dt.day.toString().padLeft(2, '0');
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      return '$m/$d $hh:$mm';
+    }
+    return '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('通知', style: TextStyle(fontWeight: FontWeight.bold)),
+        actions: [
+          TextButton(
+            onPressed: () => _markAllAsRead(uid),
+            child: const Text('すべて既読'),
+          ),
+        ],
+      ),
+      body: uid.isEmpty
+          ? const Center(child: Text('ログインすると通知が表示されます'))
+          : StreamBuilder(
+              stream: FirebaseFirestore.instance
+                  .collection('notifications')
+                  .where('targetUserId', isEqualTo: uid)
+                  .snapshots(),
+              builder: (context, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snap.hasData || snap.data == null) {
+                  return const Center(child: Text('まだ通知はありません'));
+                }
+
+                final docs = List.from((snap.data as QuerySnapshot).docs);
+                docs.sort((a, b) {
+                  final da = (a as QueryDocumentSnapshot).data() as Map;
+                  final db = (b as QueryDocumentSnapshot).data() as Map;
+                  final ta = da['createdAt'] is Timestamp
+                      ? (da['createdAt'] as Timestamp).millisecondsSinceEpoch
+                      : 0;
+                  final tb = db['createdAt'] is Timestamp
+                      ? (db['createdAt'] as Timestamp).millisecondsSinceEpoch
+                      : 0;
+                  return tb.compareTo(ta);
+                });
+
+                if (docs.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'まだ通知はありません',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  );
+                }
+
+                return Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 680),
+                    child: ListView.separated(
+                      itemCount: docs.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, idx) {
+                        final doc = docs[idx] as QueryDocumentSnapshot;
+                        final data = doc.data() as Map;
+                        final bool isRead = data['isRead'] == true;
+                        final String type = (data['type'] ?? '').toString();
+                        final String fromName = (data['fromUserName'] ?? 'ユーザー')
+                            .toString();
+                        final String summary = (data['postSummary'] ?? '')
+                            .toString();
+                        final String replyText = (data['replyText'] ?? '')
+                            .toString();
+                        final String postId = (data['postId'] ?? '').toString();
+                        final String timeStr = _formatTimestamp(
+                          data['createdAt'],
+                        );
+
+                        IconData leadingIcon = Icons.notifications;
+                        Color iconColor = Colors.blue;
+                        String message = '$fromName さんからアクションがありました';
+
+                        if (type == 'like') {
+                          leadingIcon = Icons.favorite;
+                          iconColor = Colors.pink;
+                          message = '$fromName さんがあなたの投稿にいいねしました';
+                        } else if (type == 'helpful') {
+                          leadingIcon = Icons.lightbulb;
+                          iconColor = Colors.orange;
+                          message = '$fromName さんがあなたの投稿を「参考になった」と評価しました';
+                        } else if (type == 'reply') {
+                          leadingIcon = Icons.chat_bubble;
+                          iconColor = Colors.blue;
+                          message = '$fromName さんがあなたの投稿に返信しました';
+                        } else if (type == 'follow') {
+                          leadingIcon = Icons.person_add;
+                          iconColor = Colors.teal;
+                          message = '$fromName さんにフォローされました';
+                        }
+
+                        return ListTile(
+                          tileColor: isRead
+                              ? Colors.white
+                              : Colors.blue.shade50,
+                          leading: CircleAvatar(
+                            backgroundColor: iconColor.withValues(alpha: 0.12),
+                            child: Icon(leadingIcon, color: iconColor),
+                          ),
+                          title: Text(
+                            message,
+                            style: TextStyle(
+                              fontWeight: isRead
+                                  ? FontWeight.normal
+                                  : FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (replyText.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4.0),
+                                  child: Text(
+                                    '「$replyText」',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                              if (summary.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2.0),
+                                  child: Text(
+                                    summary,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ),
+                              if (timeStr.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2.0),
+                                  child: Text(
+                                    timeStr,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          onTap: () {
+                            if (!isRead) {
+                              doc.reference.update({'isRead': true});
+                            }
+                            if (postId.isNotEmpty) {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      SnsDetailScreen(postId: postId),
+                                ),
+                              );
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 }

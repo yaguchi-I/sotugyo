@@ -8,15 +8,20 @@ import 'package:image_picker/image_picker.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
 import 'ai_chat_screen.dart';
+import '../services/ai_knowledge_service.dart';
 
 class SnsAddScreen extends StatefulWidget {
-  const SnsAddScreen({super.key});
+  final VoidCallback? onPostSuccess;
+
+  const SnsAddScreen({super.key, this.onPostSuccess});
 
   @override
   State createState() => _SnsAddScreenState();
 }
 
 class _SnsAddScreenState extends State {
+  VoidCallback? get _onPostSuccess => (widget as SnsAddScreen).onPostSuccess;
+
   final TextEditingController _contentController = TextEditingController();
   final TextEditingController _recipeTitleController = TextEditingController();
   final TextEditingController _recipeCostController = TextEditingController();
@@ -202,6 +207,9 @@ class _SnsAddScreenState extends State {
     final messenger = ScaffoldMessenger.of(context);
     final content = _contentController.text.trim();
     final recipeTitle = _recipeTitleController.text.trim();
+    final recipeCost = _recipeCostController.text.trim();
+    final recipeTime = _recipeTimeController.text.trim();
+    final recipeSteps = _recipeStepsController.text.trim();
 
     if (!_isRecipeMode && content.isEmpty && _imageBytesList.isEmpty) {
       messenger.showSnackBar(
@@ -215,8 +223,7 @@ class _SnsAddScreenState extends State {
       return;
     }
 
-    final combinedCheckText =
-        '$recipeTitle $content ${_recipeStepsController.text}';
+    final combinedCheckText = '$recipeTitle $content $recipeSteps';
     if (_containsLocalNgWord(combinedCheckText)) {
       messenger.showSnackBar(
         const SnackBar(
@@ -270,34 +277,61 @@ class _SnsAddScreenState extends State {
         }
       }
 
-      final List imagesBase64List = _imageBytesList
+      final List imageSnapshot = List.from(_imageBytesList);
+      final List imagesBase64List = imageSnapshot
           .map((b) => base64Encode(b as Uint8List))
           .toList();
       final String firstImageBase64 = imagesBase64List.isNotEmpty
           ? imagesBase64List.first.toString()
           : '';
 
+      final String finalMainCat = _isRecipeMode ? '料理' : _selectedMainCategory;
+      final String finalSubCat = _selectedSubCategory;
+      final String finalTitle = _isRecipeMode ? recipeTitle : '';
+      final int initialCost = AiKnowledgeService.parseEstimatedCost(
+        _isRecipeMode ? recipeCost : '',
+      );
+      final String initialPriceTier = AiKnowledgeService.inferPriceTierFromCost(
+        initialCost,
+      );
+      final List initialTags = AiKnowledgeService.buildImmediateFallbackTags(
+        mainCategory: finalMainCat,
+        subCategory: finalSubCat,
+        title: finalTitle,
+        content: content,
+        ingredients: ingredientsData,
+        estimatedCost: initialCost,
+      );
+
       final docRef = await FirebaseFirestore.instance.collection('posts').add({
         'userId': uid,
         'userName': userName,
         'userIconBase64': userIconBase64,
-        'mainCategory': _isRecipeMode ? '料理' : _selectedMainCategory,
-        'subCategory': _selectedSubCategory,
-        'title': _isRecipeMode ? recipeTitle : '',
+        'mainCategory': finalMainCat,
+        'subCategory': finalSubCat,
+        'title': finalTitle,
         'content': content,
         'hasImage': imagesBase64List.isNotEmpty,
         'imageBase64': firstImageBase64,
         'imagesBase64': imagesBase64List,
         'isRecipePost': _isRecipeMode,
-        'recipeCost': _isRecipeMode ? _recipeCostController.text.trim() : '',
-        'recipeTime': _isRecipeMode ? _recipeTimeController.text.trim() : '',
+        'recipeCost': _isRecipeMode ? recipeCost : '',
+        'recipeTime': _isRecipeMode ? recipeTime : '',
         'recipeServings': _isRecipeMode ? _baseServings : 1,
         'recipeIngredients': ingredientsData,
-        'recipeSteps': _isRecipeMode ? _recipeStepsController.text.trim() : '',
+        'recipeSteps': _isRecipeMode ? recipeSteps : '',
+        'aiTags': initialTags,
+        'priceTier': initialPriceTier,
+        'estimatedCost': initialCost,
+        'usedAppliances': [],
+        'summaryForAi': finalTitle.isNotEmpty ? finalTitle : content,
+        'isAiIndexed': false,
         'likes': 0,
         'helpfuls': 0,
         'saves': 0,
         'replies': 0,
+        'impressions': 0,
+        'valueScore': 0.0,
         'likedUsers': [],
         'helpfulUsers': [],
         'savedUsers': [],
@@ -306,7 +340,22 @@ class _SnsAddScreenState extends State {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
+      final bool savedRecipeMode = _isRecipeMode;
+
       _runBackgroundModeration(docRef.id, combinedCheckText);
+      AiKnowledgeService.enrichPostMetadataInBackground(
+        docId: docRef.id,
+        mainCategory: finalMainCat,
+        subCategory: finalSubCat,
+        title: finalTitle,
+        content: content,
+        isRecipePost: savedRecipeMode,
+        recipeCostText: savedRecipeMode ? recipeCost : '',
+        recipeTimeText: savedRecipeMode ? recipeTime : '',
+        ingredients: ingredientsData,
+        recipeSteps: savedRecipeMode ? recipeSteps : '',
+        images: imageSnapshot,
+      );
 
       if (!mounted) return;
 
@@ -322,10 +371,15 @@ class _SnsAddScreenState extends State {
           (mapRow['amount'] as TextEditingController).clear();
         }
         _imageBytesList.clear();
+        _isRecipeMode = false;
         _isUploading = false;
       });
 
       messenger.showSnackBar(const SnackBar(content: Text('タイムラインに投稿しました！')));
+
+      if (_onPostSuccess != null) {
+        _onPostSuccess!();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -688,11 +742,16 @@ class _SnsAddScreenState extends State {
                   child: Stack(
                     alignment: Alignment.topRight,
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
+                      Container(
+                        height: 220,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade900,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        clipBehavior: Clip.antiAlias,
                         child: Image.memory(
                           bytes,
-                          width: double.infinity,
                           fit: BoxFit.contain,
                           gaplessPlayback: true,
                         ),
