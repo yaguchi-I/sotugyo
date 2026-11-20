@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
+import '../services/ai_knowledge_service.dart';
 import 'ai_chat_screen.dart';
 import 'sns_detail_screen.dart';
 import 'sns_reply_screen.dart';
@@ -22,7 +24,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
   final TextEditingController _searchController = TextEditingController();
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
   final String currentEmailPrefix =
-      FirebaseAuth.instance.currentUser?.email?.split('@')[0] ?? '';
+      (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
 
   String _searchQuery = '';
   String _selectedTag = 'すべて';
@@ -37,17 +39,90 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
   }
 
   Uint8List? _decodeBase64(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
+    if (base64String == null || base64String.trim().isEmpty) return null;
+    final cleaned = base64String.contains(',')
+        ? base64String.split(',').last.replaceAll(RegExp(r'\s+'), '')
+        : base64String.replaceAll(RegExp(r'\s+'), '');
+    if (cleaned.isEmpty) return null;
     try {
-      return base64Decode(base64String);
+      final decoded = base64Decode(cleaned);
+      return decoded.isEmpty ? null : decoded;
     } catch (e) {
       return null;
     }
   }
 
-  String _getTopicKey(dynamic post) {
-    final mainCat = post['mainCategory']?.toString() ?? '指定なし';
-    final subCat = post['subCategory']?.toString() ?? '指定なし';
+  Map<String, dynamic> _asMap(dynamic value) {
+    if (value is Map<String, dynamic>) return value;
+    if (value is Map) return Map<String, dynamic>.from(value);
+    return const <String, dynamic>{};
+  }
+
+  List _readUserList(Map<String, dynamic> data, String key) {
+    final reactions = _asMap(data['reactions']);
+    if (reactions[key] is List) {
+      return List.from(reactions[key] as List);
+    }
+    final moderation = _asMap(data['moderation']);
+    if (moderation[key] is List) {
+      return List.from(moderation[key] as List);
+    }
+    if (data[key] is List) {
+      return List.from(data[key] as List);
+    }
+    return const [];
+  }
+
+  int _readReactionCount(
+    Map<String, dynamic> data,
+    String countKey,
+    List fallbackList,
+  ) {
+    final counts = _asMap(data['counts']);
+    final dynamic rawCount = counts[countKey] ?? data[countKey];
+    if (rawCount is num) {
+      return max(0, max(rawCount.toInt(), fallbackList.length));
+    }
+    if (rawCount != null) {
+      final parsed = int.tryParse(rawCount.toString().trim());
+      if (parsed != null) {
+        return max(0, max(parsed, fallbackList.length));
+      }
+    }
+    return fallbackList.length;
+  }
+
+  String _readMainCategory(Map<String, dynamic> data) {
+    final category = _asMap(data['category']);
+    if (category['main'] != null) {
+      return category['main'].toString();
+    }
+    return data['mainCategory']?.toString() ?? '指定なし';
+  }
+
+  String _readSubCategory(Map<String, dynamic> data) {
+    final category = _asMap(data['category']);
+    if (category['sub'] != null) {
+      return category['sub'].toString();
+    }
+    return data['subCategory']?.toString() ?? '指定なし';
+  }
+
+  int _getLikesCount(Map<String, dynamic> data) {
+    final likedUsers = _readUserList(data, 'likedUsers');
+    return _readReactionCount(data, 'likes', likedUsers);
+  }
+
+  int _compareTimestampsDesc(Timestamp? aTime, Timestamp? bTime) {
+    if (aTime == null && bTime == null) return 0;
+    if (aTime == null) return 1;
+    if (bTime == null) return -1;
+    return bTime.compareTo(aTime);
+  }
+
+  String _getTopicKey(Map<String, dynamic> post) {
+    final mainCat = _readMainCategory(post);
+    final subCat = _readSubCategory(post);
     if (mainCat == '指定なし') return '';
     if (subCat != '指定なし' && subCat.isNotEmpty) {
       return '$mainCat:$subCat';
@@ -93,6 +168,58 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
     return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
+  Future<void> _toggleReaction({
+    required String docId,
+    required String listField,
+    required String countField,
+    required List currentUsers,
+    required int likesCount,
+    required int helpfulsCount,
+    required int savesCount,
+    required int repliesCount,
+    required int impressionsCount,
+  }) async {
+    if (currentUserId.isEmpty) return;
+    final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
+    final isAdded = currentUsers.contains(currentUserId);
+
+    showReactionToast(context, listField, added: !isAdded);
+
+    int nextLikes = likesCount;
+    int nextHelpfuls = helpfulsCount;
+    int nextSaves = savesCount;
+
+    if (countField == 'likes') {
+      nextLikes = isAdded ? max(0, likesCount - 1) : likesCount + 1;
+    } else if (countField == 'helpfuls') {
+      nextHelpfuls = isAdded ? max(0, helpfulsCount - 1) : helpfulsCount + 1;
+    } else if (countField == 'saves') {
+      nextSaves = isAdded ? max(0, savesCount - 1) : savesCount + 1;
+    }
+
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: nextLikes,
+      helpfuls: nextHelpfuls,
+      saves: nextSaves,
+      replies: repliesCount,
+      impressions: impressionsCount,
+    );
+
+    final int nextTargetCount = countField == 'likes'
+        ? nextLikes
+        : (countField == 'helpfuls' ? nextHelpfuls : nextSaves);
+
+    try {
+      await docRef.update({
+        listField: isAdded
+            ? FieldValue.arrayRemove([currentUserId])
+            : FieldValue.arrayUnion([currentUserId]),
+        countField: nextTargetCount,
+        'valueScore': nextScore,
+      });
+    } catch (_) {}
+  }
+
   Future _askAiSubstitution({
     required String recipeTitle,
     required List ingredients,
@@ -124,8 +251,10 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
 
     final ingSummary = ingredients
         .map((e) {
-          final m = e as Map;
-          return '${m['name']}: ${m['amount']}';
+          if (e is Map) {
+            return '${e['name'] ?? ''}: ${e['amount'] ?? ''}';
+          }
+          return e.toString();
         })
         .join('、');
     final missingText = missingAppliances.isEmpty
@@ -473,36 +602,54 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
   }
 
   Widget _buildRecipeSection(
-    dynamic post,
+    Map<String, dynamic> post,
     String docId,
     List missingAppliances,
   ) {
-    final String recipeTitle =
-        post['recipeTitle']?.toString().isNotEmpty == true
-        ? post['recipeTitle'].toString()
-        : '手作りレシピ';
-    final int baseServings = (post['baseServings'] is int)
-        ? (post['baseServings'] as int)
-        : (int.tryParse(post['baseServings']?.toString() ?? '1') ?? 1);
-    final int currentServings =
-        (_servingsPerPost[docId] as int?) ?? baseServings;
+    final recipeBox = _asMap(post['recipe']);
 
-    final int baseCost = (post['recipeCost'] is int)
-        ? (post['recipeCost'] as int)
-        : (int.tryParse(post['recipeCost']?.toString() ?? '0') ?? 0);
+    final rawTitle =
+        (post['recipeTitle'] ?? post['title'] ?? recipeBox['title'] ?? '')
+            .toString()
+            .trim();
+    final String recipeTitle = rawTitle.isNotEmpty ? rawTitle : '手作りレシピ';
+
+    final rawServings =
+        recipeBox['baseServings'] ??
+        post['baseServings'] ??
+        post['recipeServings'] ??
+        1;
+    final int baseServings = (rawServings is int)
+        ? rawServings
+        : (int.tryParse(rawServings.toString()) ?? 1);
+    final int currentServings =
+        (_servingsPerPost[docId] as int?) ??
+        (baseServings > 0 ? baseServings : 1);
+
+    final rawCost = recipeBox['cost'] ?? post['recipeCost'] ?? '';
+    final int baseCost = (rawCost is int)
+        ? rawCost
+        : (int.tryParse(rawCost.toString().replaceAll(RegExp(r'[^0-9]'), '')) ??
+              0);
     final int scaledCost = baseServings > 0
         ? ((baseCost * currentServings) / baseServings).round()
         : baseCost;
 
-    final String recipeTime = post['recipeTime']?.toString() ?? '';
-    final List ingredients = List.from(post['recipeIngredients'] ?? []);
-    final String steps = post['recipeSteps']?.toString() ?? '';
+    final String recipeTime = (recipeBox['time'] ?? post['recipeTime'] ?? '')
+        .toString();
+    final rawIngredients =
+        recipeBox['ingredients'] ?? post['recipeIngredients'] ?? const [];
+    final List ingredients = rawIngredients is List
+        ? List.from(rawIngredients)
+        : const [];
+    final String steps = (recipeBox['steps'] ?? post['recipeSteps'] ?? '')
+        .toString();
 
     return Container(
       margin: const EdgeInsets.only(top: 10.0),
       padding: const EdgeInsets.all(14.0),
       decoration: BoxDecoration(
-        color: Colors.orange.shade50.withOpacity(0.5),
+        color: Colors.orange.shade50.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: Colors.orange.shade200),
       ),
@@ -657,8 +804,8 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
             ),
             const SizedBox(height: 6),
             ...ingredients.map((item) {
-              final mapItem = item as Map;
-              final iName = mapItem['name']?.toString() ?? '';
+              final mapItem = item is Map ? item : const {};
+              final iName = mapItem['name']?.toString() ?? item.toString();
               final iRawAmount = mapItem['amount']?.toString() ?? '';
               final iScaledAmount = _scaleAmountString(
                 iRawAmount,
@@ -678,7 +825,9 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        '$iName ： $iScaledAmount',
+                        iRawAmount.isNotEmpty
+                            ? '$iName ： $iScaledAmount'
+                            : iName,
                         style: const TextStyle(fontSize: 13),
                       ),
                     ),
@@ -737,12 +886,14 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
         if (myUserSnapshot.hasData && myUserSnapshot.data != null) {
           final myDoc = myUserSnapshot.data as DocumentSnapshot;
           if (myDoc.exists && myDoc.data() != null) {
-            final dynamic myData = myDoc.data();
-            blockedUsers = List.from(myData['blockedUsers'] ?? []);
+            final myData = _asMap(myDoc.data());
+            blockedUsers = List.from(myData['blockedUsers'] ?? const []);
             lessInterestedTopics = List.from(
-              myData['lessInterestedTopics'] ?? [],
+              myData['lessInterestedTopics'] ?? const [],
             );
-            missingAppliances = List.from(myData['missingAppliances'] ?? []);
+            missingAppliances = List.from(
+              myData['missingAppliances'] ?? const [],
+            );
           }
         }
 
@@ -764,7 +915,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     });
                   },
                   decoration: InputDecoration(
-                    hintText: '検索...',
+                    hintText: '料理名・材料・本文・ユーザー名で検索...',
                     prefixIcon: const Icon(Icons.search),
                     suffixIcon: _searchQuery.isNotEmpty
                         ? IconButton(
@@ -842,22 +993,34 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     final docs = snapshot.data!.docs;
 
                     final filteredDocs = docs.where((doc) {
-                      final data = doc.data() as Map<String, dynamic>;
-                      if (data['mainCategory'] == 'AI') return false;
+                      final data = _asMap(doc.data());
+                      final mainCategory = _readMainCategory(data);
+                      final subCategory = _readSubCategory(data);
+                      if (mainCategory == 'AI') return false;
 
-                      final List hiddenUsers = List.from(
-                        data['hiddenUsers'] ?? [],
+                      final hiddenUsers = _readUserList(data, 'hiddenUsers');
+                      if (currentUserId.isNotEmpty &&
+                          hiddenUsers.contains(currentUserId)) {
+                        return false;
+                      }
+
+                      final reportedUsers = _readUserList(
+                        data,
+                        'reportedUsers',
                       );
-                      if (hiddenUsers.contains(currentUserId)) return false;
+                      if (reportedUsers.length >= 3 ||
+                          (currentUserId.isNotEmpty &&
+                              reportedUsers.contains(currentUserId))) {
+                        return false;
+                      }
 
-                      final List reportedUsers = List.from(
-                        data['reportedUsers'] ?? [],
-                      );
-                      if (reportedUsers.length >= 3) return false;
-
-                      final String postUid = data['userId']?.toString() ?? '';
+                      final authorBox = _asMap(data['author']);
+                      final String postUid =
+                          (authorBox['userId'] ?? data['userId'] ?? '')
+                              .toString();
                       final String postName =
-                          data['userName']?.toString() ?? '';
+                          (authorBox['userName'] ?? data['userName'] ?? '')
+                              .toString();
                       final String userKey = postUid.isNotEmpty
                           ? postUid
                           : postName;
@@ -866,21 +1029,38 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                         return false;
                       }
 
-                      final content = (data['content'] ?? '')
+                      final recipeBox = _asMap(data['recipe']);
+                      final titleText =
+                          (data['title'] ??
+                                  data['recipeTitle'] ??
+                                  recipeBox['title'] ??
+                                  '')
+                              .toString()
+                              .toLowerCase();
+                      final contentText = (data['content'] ?? '')
                           .toString()
                           .toLowerCase();
-                      final userName = (data['userName'] ?? '')
-                          .toString()
-                          .toLowerCase();
-                      final mainCategory = (data['mainCategory'] ?? '')
-                          .toString();
-                      final subCategory = (data['subCategory'] ?? '')
-                          .toString();
+                      final userNameText = postName.toLowerCase();
+
+                      final rawIngredients =
+                          recipeBox['ingredients'] ?? data['recipeIngredients'];
+                      final ingredientsText = rawIngredients is List
+                          ? rawIngredients
+                                .map(
+                                  (e) => e is Map
+                                      ? (e['name']?.toString() ?? '')
+                                      : e.toString(),
+                                )
+                                .join(' ')
+                                .toLowerCase()
+                          : '';
 
                       final matchesQuery =
                           _searchQuery.isEmpty ||
-                          content.contains(_searchQuery) ||
-                          userName.contains(_searchQuery);
+                          titleText.contains(_searchQuery) ||
+                          contentText.contains(_searchQuery) ||
+                          userNameText.contains(_searchQuery) ||
+                          ingredientsText.contains(_searchQuery);
 
                       bool matchesTag = true;
                       if (_selectedTag == 'すべて' || _selectedTag == 'トレンド') {
@@ -895,16 +1075,12 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     }).toList();
 
                     filteredDocs.sort((a, b) {
-                      final aData = a.data() as Map<String, dynamic>;
-                      final bData = b.data() as Map<String, dynamic>;
+                      final aData = _asMap(a.data());
+                      final bData = _asMap(b.data());
 
                       if (_selectedTag == 'トレンド') {
-                        final aLikes = (aData['likedUsers'] is List)
-                            ? (aData['likedUsers'] as List).length
-                            : 0;
-                        final bLikes = (bData['likedUsers'] is List)
-                            ? (bData['likedUsers'] as List).length
-                            : 0;
+                        final aLikes = _getLikesCount(aData);
+                        final bLikes = _getLikesCount(bData);
                         if (aLikes != bLikes) {
                           return bLikes.compareTo(aLikes);
                         }
@@ -912,8 +1088,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
 
                       final aTime = aData['createdAt'] as Timestamp?;
                       final bTime = bData['createdAt'] as Timestamp?;
-                      if (aTime == null || bTime == null) return 0;
-                      return bTime.compareTo(aTime);
+                      return _compareTimestampsDesc(aTime, bTime);
                     });
 
                     if (filteredDocs.isEmpty) {
@@ -928,8 +1103,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     return ListView.builder(
                       itemCount: filteredDocs.length,
                       itemBuilder: (context, index) {
-                        final data =
-                            filteredDocs[index].data() as Map<String, dynamic>;
+                        final data = _asMap(filteredDocs[index].data());
                         final docId = filteredDocs[index].id;
                         final String topicKey = _getTopicKey(data);
                         final bool isTopicDemoted =
@@ -957,36 +1131,50 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
   }
 
   Widget _buildPostCard(
-    dynamic post,
+    Map<String, dynamic> post,
     String docId,
     BuildContext context,
     String topicKey,
     bool isTopicDemoted,
     List missingAppliances,
   ) {
-    final bool hasImage = post['hasImage'] ?? false;
-    final bool isRecipePost = post['isRecipePost'] == true;
-    final int replies = post['replies'] ?? 0;
+    final mediaBox = _asMap(post['media']);
+    final recipeBox = _asMap(post['recipe']);
+    final authorBox = _asMap(post['author']);
 
-    final List likedUsers = post['likedUsers'] != null
-        ? List.from(post['likedUsers'])
-        : [];
-    final List helpfulUsers = post['helpfulUsers'] != null
-        ? List.from(post['helpfulUsers'])
-        : [];
-    final List savedUsers = post['savedUsers'] != null
-        ? List.from(post['savedUsers'])
-        : [];
+    final mainCategory = _readMainCategory(post);
+    final subCategory = _readSubCategory(post);
 
-    final bool isLiked = likedUsers.contains(currentUserId);
-    final bool isHelpful = helpfulUsers.contains(currentUserId);
-    final bool isSaved = savedUsers.contains(currentUserId);
+    final bool isRecipePost =
+        recipeBox['isRecipePost'] == true || post['isRecipePost'] == true;
 
-    final int likesCount = likedUsers.length;
-    final int helpfulsCount = helpfulUsers.length;
+    final List likedUsers = _readUserList(post, 'likedUsers');
+    final List helpfulUsers = _readUserList(post, 'helpfulUsers');
+    final List savedUsers = _readUserList(post, 'savedUsers');
 
-    final String postUserId = post['userId']?.toString() ?? '';
-    final String rawUserName = post['userName']?.toString() ?? '名無し';
+    final bool isLiked =
+        currentUserId.isNotEmpty && likedUsers.contains(currentUserId);
+    final bool isHelpful =
+        currentUserId.isNotEmpty && helpfulUsers.contains(currentUserId);
+    final bool isSaved =
+        currentUserId.isNotEmpty && savedUsers.contains(currentUserId);
+
+    final int repliesCount = _readReactionCount(post, 'replies', const []);
+    final int likesCount = _readReactionCount(post, 'likes', likedUsers);
+    final int helpfulsCount = _readReactionCount(
+      post,
+      'helpfuls',
+      helpfulUsers,
+    );
+    final int savesCount = _readReactionCount(post, 'saves', savedUsers);
+    final int impressionsCount = AiKnowledgeService.readIntField(
+      post['impressions'],
+    );
+
+    final String postUserId = (authorBox['userId'] ?? post['userId'] ?? '')
+        .toString();
+    final String rawUserName =
+        (authorBox['userName'] ?? post['userName'] ?? '名無し').toString();
     final bool isMyPost =
         (postUserId.isNotEmpty && postUserId == currentUserId) ||
         (currentEmailPrefix.isNotEmpty && rawUserName == currentEmailPrefix);
@@ -998,9 +1186,12 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
         ? postUserId
         : rawUserName;
 
-    final Uint8List? postImageBytes = _decodeBase64(
-      post['imageBase64']?.toString(),
-    );
+    final String rawImageBase64 =
+        (mediaBox['imageBase64'] ?? post['imageBase64'] ?? '').toString();
+    final Uint8List? postImageBytes = _decodeBase64(rawImageBase64);
+    final bool hasImage =
+        (mediaBox['hasImage'] == true || post['hasImage'] == true) ||
+        postImageBytes != null;
     final String heroTag = 'search_img_$docId';
 
     return StreamBuilder(
@@ -1012,12 +1203,14 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
           : null,
       builder: (context, userSnapshot) {
         String displayUserName = rawUserName;
-        String displayIconBase64 = post['userIconBase64']?.toString() ?? '';
+        String displayIconBase64 =
+            (authorBox['userIconBase64'] ?? post['userIconBase64'] ?? '')
+                .toString();
 
         if (userSnapshot.hasData && userSnapshot.data != null) {
           final userDoc = userSnapshot.data as DocumentSnapshot;
           if (userDoc.exists && userDoc.data() != null) {
-            final dynamic uData = userDoc.data();
+            final uData = _asMap(userDoc.data());
             if (uData['userName'] != null &&
                 uData['userName'].toString().trim().isNotEmpty) {
               displayUserName = uData['userName'].toString().trim();
@@ -1076,8 +1269,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                               fontSize: 16,
                             ),
                           ),
-                          if (post['mainCategory'] != null &&
-                              post['mainCategory'] != '指定なし')
+                          if (mainCategory.isNotEmpty && mainCategory != '指定なし')
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 6,
@@ -1088,15 +1280,14 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                post['mainCategory'].toString(),
+                                mainCategory,
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: Colors.blue.shade700,
                                 ),
                               ),
                             ),
-                          if (post['subCategory'] != null &&
-                              post['subCategory'] != '指定なし')
+                          if (subCategory.isNotEmpty && subCategory != '指定なし')
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 6,
@@ -1107,7 +1298,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                post['subCategory'].toString(),
+                                subCategory,
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: Colors.green.shade700,
@@ -1208,7 +1399,7 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                     _buildActionButton(
                       icon: Icons.chat_bubble_outline,
                       color: Colors.black54,
-                      count: replies,
+                      count: repliesCount,
                       onTap: () {
                         Navigator.push(
                           context,
@@ -1225,89 +1416,50 @@ class _SnsSearchScreenState extends State<SnsSearchScreen> {
                       icon: isLiked ? Icons.favorite : Icons.favorite_border,
                       color: isLiked ? Colors.pink : Colors.black54,
                       count: likesCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'likedUsers',
-                          added: !isLiked,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isLiked) {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                      onTap: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'likedUsers',
+                        countField: 'likes',
+                        currentUsers: likedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: repliesCount,
+                        impressionsCount: impressionsCount,
+                      ),
                     ),
                     _buildActionButton(
                       icon: isHelpful ? Icons.thumb_up : Icons.thumb_up_off_alt,
                       color: isHelpful ? Colors.blue : Colors.black54,
                       count: helpfulsCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'helpfulUsers',
-                          added: !isHelpful,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isHelpful) {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                      onTap: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'helpfulUsers',
+                        countField: 'helpfuls',
+                        currentUsers: helpfulUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: repliesCount,
+                        impressionsCount: impressionsCount,
+                      ),
                     ),
                     IconButton(
                       icon: Icon(
                         isSaved ? Icons.bookmark : Icons.bookmark_border,
                         color: isSaved ? Colors.blue : Colors.black54,
                       ),
-                      onPressed: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'savedUsers',
-                          added: !isSaved,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isSaved) {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                      onPressed: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'savedUsers',
+                        countField: 'saves',
+                        currentUsers: savedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: repliesCount,
+                        impressionsCount: impressionsCount,
+                      ),
                     ),
                   ],
                 ),
