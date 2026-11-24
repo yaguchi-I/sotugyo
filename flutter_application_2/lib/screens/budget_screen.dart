@@ -11,6 +11,11 @@ import 'ai_chat_screen.dart' show AiChatScreen;
 import 'receipt_scanner_screen.dart' show ReceiptScannerScreen;
 import '../widgets/top_toast.dart' show showTopToast;
 
+import 'dart:io';
+
+import '../models/money_record_model.dart';
+import '../models/large_expense_model.dart';
+
 class BudgetScreen extends StatefulWidget {
   const BudgetScreen({super.key});
 
@@ -1572,6 +1577,11 @@ class _BudgetScreenState extends State {
         trailing: const Icon(Icons.edit_outlined, color: Colors.black45),
       ),
     );
+    if (ok != true) return;
+    await FirebaseFirestore.instance
+        .collection('large_expenses')
+        .doc(e.id)
+        .delete();
   }
 
   Widget _buildLargeExpenseCard(int plannedTotal) {
