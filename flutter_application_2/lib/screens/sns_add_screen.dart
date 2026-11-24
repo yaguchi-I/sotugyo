@@ -48,7 +48,20 @@ class SnsAddScreen extends StatefulWidget {
 class _SnsAddScreenState extends State {
   VoidCallback? get _onPostSuccess => (widget as SnsAddScreen).onPostSuccess;
 
+  static final RegExp _hashtagRegex = RegExp(
+    r'[#＃]([^\s#＃、,。\.!！?？\(\)（）「」『』【】]+)',
+  );
+
+  static const Map _suggestedHashtags = {
+    '指定なし': ['一人暮らし', '節約', '時短', '100均', '買ってよかった'],
+    '料理': ['時短', '節約', '100円以下', '洗い物少ない', 'レンチン', 'フライパン1つ', '自炊'],
+    '掃除': ['100均', '時短掃除', '重曹', 'クエン酸', 'カビ対策', '水回り'],
+    '収納': ['100均', '省スペース', 'ワンルーム', '無印', 'ニトリ', '浮かせる収納'],
+    'その他': ['節約術', '光熱費', '一人暮らし', '買ってよかった', 'ライフハック'],
+  };
+
   final TextEditingController _contentController = TextEditingController();
+  final TextEditingController _hashtagInputController = TextEditingController();
   final TextEditingController _recipeTitleController = TextEditingController();
   final TextEditingController _recipeCostController = TextEditingController();
   final TextEditingController _recipeTimeController = TextEditingController();
@@ -59,6 +72,8 @@ class _SnsAddScreenState extends State {
     {'name': TextEditingController(), 'amount': TextEditingController()},
     {'name': TextEditingController(), 'amount': TextEditingController()},
   ];
+
+  final List _hashtags = [];
 
   bool _isUploading = false;
   bool _isPickingImage = false;
@@ -92,6 +107,7 @@ class _SnsAddScreenState extends State {
   @override
   void dispose() {
     _contentController.dispose();
+    _hashtagInputController.dispose();
     _recipeTitleController.dispose();
     _recipeCostController.dispose();
     _recipeTimeController.dispose();
@@ -102,6 +118,66 @@ class _SnsAddScreenState extends State {
       (mapRow['amount'] as TextEditingController).dispose();
     }
     super.dispose();
+  }
+
+  List _extractHashtagsFromText(String text) {
+    final List result = [];
+    if (text.trim().isEmpty) return result;
+    for (final match in _hashtagRegex.allMatches(text)) {
+      final tag = (match.group(1) ?? '').trim();
+      if (tag.isNotEmpty && !result.contains(tag)) {
+        result.add(tag);
+      }
+    }
+    return result;
+  }
+
+  void _addCustomHashtags() {
+    final raw = _hashtagInputController.text.trim();
+    if (raw.isEmpty) return;
+    final parts = raw
+        .split(RegExp(r'[\s 、,・/]+'))
+        .map((e) => e.replaceAll(RegExp(r'^[#＃]+'), '').trim())
+        .where((e) => e.isNotEmpty);
+    setState(() {
+      for (final p in parts) {
+        final normalized = p.length > 20 ? p.substring(0, 20) : p;
+        if (!_hashtags.contains(normalized) && _hashtags.length < 10) {
+          _hashtags.add(normalized);
+        }
+      }
+      _hashtagInputController.clear();
+    });
+  }
+
+  void _toggleSuggestedHashtag(String tag) {
+    setState(() {
+      if (_hashtags.contains(tag)) {
+        _hashtags.remove(tag);
+      } else if (_hashtags.length < 10) {
+        _hashtags.add(tag);
+      }
+    });
+  }
+
+  List _collectAllHashtags(String title, String content) {
+    final List merged = [];
+    for (final raw in _hashtags) {
+      final t = raw.toString().trim();
+      if (t.isNotEmpty && !merged.contains(t)) {
+        merged.add(t);
+      }
+    }
+    for (final raw in [
+      ..._extractHashtagsFromText(title),
+      ..._extractHashtagsFromText(content),
+    ]) {
+      final t = raw.toString().trim();
+      if (t.isNotEmpty && !merged.contains(t)) {
+        merged.add(t);
+      }
+    }
+    return merged.take(12).toList();
   }
 
   void _addIngredientRow() {
@@ -130,7 +206,11 @@ class _SnsAddScreenState extends State {
 
     try {
       final picker = ImagePicker();
-      final pickedFiles = await picker.pickMultiImage(imageQuality: 85);
+      final pickedFiles = await picker.pickMultiImage(
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 70,
+      );
       if (pickedFiles.isNotEmpty) {
         final List loaded = [];
         for (final f in pickedFiles) {
@@ -167,7 +247,9 @@ class _SnsAddScreenState extends State {
       final picker = ImagePicker();
       final pickedFile = await picker.pickImage(
         source: ImageSource.camera,
-        imageQuality: 85,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 70,
       );
       if (pickedFile != null) {
         final bytes = await pickedFile.readAsBytes();
@@ -230,6 +312,10 @@ class _SnsAddScreenState extends State {
   }
 
   Future _submitPost() async {
+    if (_hashtagInputController.text.trim().isNotEmpty) {
+      _addCustomHashtags();
+    }
+
     final messenger = ScaffoldMessenger.of(context);
     final content = _contentController.text.trim();
     final recipeTitle = _recipeTitleController.text.trim();
@@ -249,7 +335,12 @@ class _SnsAddScreenState extends State {
       return;
     }
 
-    final combinedCheckText = '$recipeTitle $content $recipeSteps';
+    final List finalHashtags = _collectAllHashtags(
+      _isRecipeMode ? recipeTitle : '',
+      content,
+    );
+    final combinedCheckText =
+        '$recipeTitle $content $recipeSteps ${finalHashtags.join(' ')}';
     if (_containsLocalNgWord(combinedCheckText)) {
       messenger.showSnackBar(
         const SnackBar(
@@ -320,14 +411,22 @@ class _SnsAddScreenState extends State {
       final String initialPriceTier = AiKnowledgeService.inferPriceTierFromCost(
         initialCost,
       );
-      final List initialTags = AiKnowledgeService.buildImmediateFallbackTags(
-        mainCategory: finalMainCat,
-        subCategory: finalSubCat,
-        title: finalTitle,
-        content: content,
-        ingredients: ingredientsData,
-        estimatedCost: initialCost,
+      final List initialTags = List.from(
+        AiKnowledgeService.buildImmediateFallbackTags(
+          mainCategory: finalMainCat,
+          subCategory: finalSubCat,
+          title: finalTitle,
+          content: content,
+          ingredients: ingredientsData,
+          estimatedCost: initialCost,
+        ),
       );
+      for (final rawH in finalHashtags) {
+        final h = rawH.toString();
+        if (!initialTags.contains(h)) {
+          initialTags.add(h);
+        }
+      }
 
       final docRef = await FirebaseFirestore.instance.collection('posts').add({
         'userId': uid,
@@ -337,6 +436,7 @@ class _SnsAddScreenState extends State {
         'subCategory': finalSubCat,
         'title': finalTitle,
         'content': content,
+        'hashtags': finalHashtags,
         'hasImage': imagesBase64List.isNotEmpty,
         'imageBase64': firstImageBase64,
         'imagesBase64': imagesBase64List,
@@ -374,7 +474,9 @@ class _SnsAddScreenState extends State {
         mainCategory: finalMainCat,
         subCategory: finalSubCat,
         title: finalTitle,
-        content: content,
+        content: finalHashtags.isEmpty
+            ? content
+            : '$content ${finalHashtags.map((e) => '#$e').join(' ')}',
         isRecipePost: savedRecipeMode,
         recipeCostText: savedRecipeMode ? recipeCost : '',
         recipeTimeText: savedRecipeMode ? recipeTime : '',
@@ -387,6 +489,8 @@ class _SnsAddScreenState extends State {
 
       setState(() {
         _contentController.clear();
+        _hashtagInputController.clear();
+        _hashtags.clear();
         _recipeTitleController.clear();
         _recipeCostController.clear();
         _recipeTimeController.clear();
@@ -418,6 +522,8 @@ class _SnsAddScreenState extends State {
 
   bool get _hasDraft =>
       _contentController.text.trim().isNotEmpty ||
+      _hashtagInputController.text.trim().isNotEmpty ||
+      _hashtags.isNotEmpty ||
       _recipeTitleController.text.trim().isNotEmpty ||
       _recipeStepsController.text.trim().isNotEmpty ||
       _imageBytesList.isNotEmpty;
@@ -453,6 +559,16 @@ class _SnsAddScreenState extends State {
     final List currentSubList = List.from(
       _subCategories[_selectedMainCategory] ?? ['指定なし'],
     );
+    final String activeMain = _isRecipeMode ? '料理' : _selectedMainCategory;
+    final List currentSuggestedTags = List.from(
+      _suggestedHashtags[activeMain] ?? _suggestedHashtags['指定なし'],
+    );
+    final List customHashtags = _hashtags
+        .where((t) => !currentSuggestedTags.contains(t))
+        .toList();
+    final List inlineHashtags = _extractHashtagsFromText(
+      '${_recipeTitleController.text} ${_contentController.text}',
+    ).where((t) => !_hashtags.contains(t)).toList();
 
     return PopScope(
       canPop: false,
@@ -598,6 +714,7 @@ class _SnsAddScreenState extends State {
                     children: [
                       TextField(
                         controller: _recipeTitleController,
+                        onChanged: (_) => setState(() {}),
                         decoration: const InputDecoration(
                           labelText: '料理名（必須）',
                           hintText: '例：豚バラとキャベツの旨塩炒め',
@@ -759,10 +876,158 @@ class _SnsAddScreenState extends State {
               TextField(
                 controller: _contentController,
                 maxLines: 5,
+                onChanged: (_) => setState(() {}),
                 decoration: InputDecoration(
                   labelText: _isRecipeMode ? 'ひとことコメント・コツなど（任意）' : '投稿内容（必須）',
-                  hintText: '一人暮らしの知恵や今日のご飯、質問などを自由に書こう！',
+                  hintText: '一人暮らしの知恵や今日のご飯を書こう！（本文に #時短 のように書いてもタグになります）',
                   border: const OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.indigo.shade50.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.indigo.shade100),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.tag,
+                          size: 16,
+                          color: Colors.indigo.shade700,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'ハッシュタグ（任意・最大10個）',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.indigo.shade900,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final rawTag in currentSuggestedTags)
+                          FilterChip(
+                            label: Text(
+                              '#${rawTag.toString()}',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            selected: _hashtags.contains(rawTag.toString()),
+                            showCheckmark: false,
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                            selectedColor: Colors.indigo.shade100,
+                            backgroundColor: Colors.white,
+                            side: BorderSide(
+                              color: _hashtags.contains(rawTag.toString())
+                                  ? Colors.indigo
+                                  : Colors.grey.shade300,
+                            ),
+                            labelStyle: TextStyle(
+                              color: _hashtags.contains(rawTag.toString())
+                                  ? Colors.indigo.shade900
+                                  : Colors.black87,
+                              fontWeight: _hashtags.contains(rawTag.toString())
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                            ),
+                            onSelected: (_) =>
+                                _toggleSuggestedHashtag(rawTag.toString()),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _hashtagInputController,
+                            decoration: const InputDecoration(
+                              hintText: '自由タグを追加（例：もやし、業務スーパー）',
+                              prefixText: '# ',
+                              filled: true,
+                              fillColor: Colors.white,
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 9,
+                              ),
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (_) => _addCustomHashtags(),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed: _addCustomHashtags,
+                          icon: const Icon(Icons.add, size: 17),
+                          label: const Text('追加'),
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (customHashtags.isNotEmpty ||
+                        inlineHashtags.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final rawCustom in customHashtags)
+                            InputChip(
+                              visualDensity: VisualDensity.compact,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              label: Text(
+                                '#${rawCustom.toString()}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.indigo.shade900,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              backgroundColor: Colors.white,
+                              side: BorderSide(color: Colors.indigo.shade200),
+                              deleteIconColor: Colors.indigo.shade700,
+                              onDeleted: () {
+                                setState(() {
+                                  _hashtags.remove(rawCustom.toString());
+                                });
+                              },
+                            ),
+                          for (final rawInline in inlineHashtags)
+                            Chip(
+                              visualDensity: VisualDensity.compact,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              label: Text(
+                                '#${rawInline.toString()}（本文から自動認識）',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.blue.shade800,
+                                ),
+                              ),
+                              backgroundColor: Colors.blue.shade50,
+                              side: BorderSide(color: Colors.blue.shade100),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ],
                 ),
               ),
               const SizedBox(height: 16),

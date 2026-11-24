@@ -18,6 +18,49 @@ import '../widgets/top_toast.dart' show showReactionToast;
 class SnsScreen extends StatefulWidget {
   const SnsScreen({super.key});
 
+  static final RegExp hashtagRegex = RegExp(
+    r'[#＃]([^\s#＃、,。\.!！?？\(\)（）「」『』【】]+)',
+  );
+
+  static List extractHashtagsFromText(String text) {
+    final List result = [];
+    if (text.trim().isEmpty) return result;
+    for (final match in hashtagRegex.allMatches(text)) {
+      final tag = (match.group(1) ?? '').trim();
+      if (tag.isNotEmpty && !result.contains(tag)) {
+        result.add(tag);
+      }
+    }
+    return result;
+  }
+
+  static List extractHashtagsFromPost(Map post) {
+    final List result = [];
+    if (post['hashtags'] is List) {
+      for (final raw in List.from(post['hashtags'])) {
+        final cleaned = raw
+            .toString()
+            .trim()
+            .replaceFirst(RegExp(r'^[#＃]+'), '')
+            .trim();
+        if (cleaned.isNotEmpty && !result.contains(cleaned)) {
+          result.add(cleaned);
+        }
+      }
+    }
+    final titleTags = extractHashtagsFromText((post['title'] ?? '').toString());
+    final contentTags = extractHashtagsFromText(
+      (post['content'] ?? '').toString(),
+    );
+    for (final t in [...titleTags, ...contentTags]) {
+      final str = t.toString();
+      if (!result.contains(str)) {
+        result.add(str);
+      }
+    }
+    return result;
+  }
+
   @override
   State createState() => _SnsScreenState();
 }
@@ -58,6 +101,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   };
   String _tagMain = _all;
   String _tagSub = _all;
+  String _selectedHashtag = '';
 
   late final Stream? _userPrefStream = currentUserId.isNotEmpty
       ? FirebaseFirestore.instance
@@ -123,6 +167,73 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
         curve: Curves.easeOutCubic,
       );
     }
+  }
+
+  void _selectHashtagAndJump(String tag) {
+    final cleaned = tag.trim().replaceFirst(RegExp(r'^[#＃]+'), '').trim();
+    if (cleaned.isEmpty) return;
+    setState(() {
+      _tagMain = _all;
+      _tagSub = _all;
+      _selectedHashtag = cleaned;
+    });
+    if (_tabController.index != 2) {
+      _tabController.animateTo(2);
+    }
+    if (_tagScrollCtrl.hasClients) {
+      _tagScrollCtrl.animateTo(
+        0,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  Widget _buildHighlightedContent(String content) {
+    final List<TextSpan> spans = [];
+    int lastEnd = 0;
+
+    for (final match in SnsScreen.hashtagRegex.allMatches(content)) {
+      if (match.start > lastEnd) {
+        spans.add(
+          TextSpan(
+            text: content.substring(lastEnd, match.start),
+            style: const TextStyle(
+              fontSize: 14,
+              height: 1.45,
+              color: Colors.black87,
+            ),
+          ),
+        );
+      }
+      spans.add(
+        TextSpan(
+          text: content.substring(match.start, match.end),
+          style: TextStyle(
+            fontSize: 14,
+            height: 1.45,
+            color: Colors.blue.shade700,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < content.length) {
+      spans.add(
+        TextSpan(
+          text: content.substring(lastEnd),
+          style: const TextStyle(
+            fontSize: 14,
+            height: 1.45,
+            color: Colors.black87,
+          ),
+        ),
+      );
+    }
+
+    return Text.rich(TextSpan(children: spans));
   }
 
   void _recordImpressionOnce(
@@ -292,6 +403,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required String targetIngredient,
     required List allIngredients,
     required List missingAppliances,
+    required List allergies,
   }) async {
     final currentKey = AiChatScreen.apiKey.trim();
     if (currentKey.isEmpty || currentKey.contains('ここに')) {
@@ -321,10 +433,11 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     final missingText = missingAppliances.isEmpty
         ? '特になし'
         : missingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(allergies);
 
     final prompt =
         '料理「$dishTitle」（全体の材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
-        '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdownの記号（*や#）は使わないでください。';
+        '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdownの記号（*や#）は使わないでください。';
 
     String replyText = '代用案を取得できませんでした。もう一度お試しください。';
 
@@ -345,6 +458,12 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
           break;
         }
       } catch (e) {}
+    }
+
+    if (allergies.isNotEmpty &&
+        AiChatScreen.containsAllergen(replyText, allergies)) {
+      replyText =
+          'アレルギー対象食材（${allergies.join('・')}）に関連する表現が含まれたため表示を控えました。AI相談画面で使える手持ち食材を指定して聞いてみてください。';
     }
 
     if (!mounted) return;
@@ -1111,6 +1230,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
               List lessInterestedTopics = [];
               List blockedUsers = [];
               List missingAppliances = [];
+              List allergies = [];
               List followingUsers = [];
 
               if (userPrefSnap.hasData && userPrefSnap.data != null) {
@@ -1130,6 +1250,12 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   }
                   if (uData['missingAppliances'] != null) {
                     missingAppliances = List.from(uData['missingAppliances']);
+                  }
+                  if (uData['allergies'] is List) {
+                    allergies = List.from(uData['allergies'])
+                        .map((e) => e.toString().trim())
+                        .where((e) => e.isNotEmpty)
+                        .toList();
                   }
                   if (uData[_followingField] is List) {
                     followingUsers = List.from(uData[_followingField]);
@@ -1216,6 +1342,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         interestedTags: interestedTags,
                         lessInterestedTopics: lessInterestedTopics,
                         missingAppliances: missingAppliances,
+                        allergies: allergies,
                       ),
                       _buildFollowingFeed(
                         docs: visibleDocs,
@@ -1223,12 +1350,14 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         interestedTags: interestedTags,
                         lessInterestedTopics: lessInterestedTopics,
                         missingAppliances: missingAppliances,
+                        allergies: allergies,
                       ),
                       _buildTagFeed(
                         docs: visibleDocs,
                         interestedTags: interestedTags,
                         lessInterestedTopics: lessInterestedTopics,
                         missingAppliances: missingAppliances,
+                        allergies: allergies,
                       ),
                     ],
                   );
@@ -1260,6 +1389,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required List interestedTags,
     required List lessInterestedTopics,
     required List missingAppliances,
+    required List allergies,
   }) {
     if (followingUsers.isEmpty) {
       return _buildFollowingEmpty(
@@ -1290,6 +1420,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       interestedTags: interestedTags,
       lessInterestedTopics: lessInterestedTopics,
       missingAppliances: missingAppliances,
+      allergies: allergies,
     );
   }
 
@@ -1342,7 +1473,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     );
   }
 
-  bool _matchesTag(Map post, String main, String sub) {
+  bool _matchesCategory(Map post, String main, String sub) {
     if (main == _all) return true;
     final postMain = post['mainCategory']?.toString() ?? '';
     if (postMain != main) return false;
@@ -1350,11 +1481,11 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     return (post['subCategory']?.toString() ?? '') == sub;
   }
 
-  int _countTag(List docs, String main, String sub) {
+  int _countCategory(List docs, String main, String sub) {
     int count = 0;
     for (final d in docs) {
       final post = (d as QueryDocumentSnapshot).data() as Map;
-      if (_matchesTag(post, main, sub)) count++;
+      if (_matchesCategory(post, main, sub)) count++;
     }
     return count;
   }
@@ -1364,11 +1495,46 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required List interestedTags,
     required List lessInterestedTopics,
     required List missingAppliances,
+    required List allergies,
   }) {
-    final filtered = docs.where((d) {
+    final categoryDocs = docs.where((d) {
       final post = (d as QueryDocumentSnapshot).data() as Map;
-      return _matchesTag(post, _tagMain, _tagSub);
+      return _matchesCategory(post, _tagMain, _tagSub);
     }).toList();
+
+    final Map hashtagCounts = {};
+    for (final d in categoryDocs) {
+      final post = (d as QueryDocumentSnapshot).data() as Map;
+      final tags = SnsScreen.extractHashtagsFromPost(post);
+      for (final rawTag in tags) {
+        final t = rawTag.toString();
+        hashtagCounts[t] = ((hashtagCounts[t] as int?) ?? 0) + 1;
+      }
+    }
+
+    final List sortedHashtags = hashtagCounts.entries.toList()
+      ..sort((a, b) => (b.value as int).compareTo(a.value as int));
+
+    final List topHashtags = sortedHashtags
+        .take(15)
+        .map((e) => {'tag': e.key.toString(), 'count': e.value as int})
+        .toList();
+
+    if (_selectedHashtag.isNotEmpty &&
+        !topHashtags.any((e) => (e as Map)['tag'] == _selectedHashtag)) {
+      topHashtags.insert(0, {
+        'tag': _selectedHashtag,
+        'count': (hashtagCounts[_selectedHashtag] as int?) ?? 0,
+      });
+    }
+
+    final filtered = _selectedHashtag.isEmpty
+        ? categoryDocs
+        : categoryDocs.where((d) {
+            final post = (d as QueryDocumentSnapshot).data() as Map;
+            final tags = SnsScreen.extractHashtagsFromPost(post);
+            return tags.contains(_selectedHashtag);
+          }).toList();
 
     final List mainList = [_all, ..._tagCategories.keys];
     final List subList = _tagMain == _all
@@ -1380,7 +1546,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
         Container(
           width: double.infinity,
           color: Colors.white,
-          padding: const EdgeInsets.only(top: 10, bottom: 6),
+          padding: const EdgeInsets.only(top: 10, bottom: 8),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1391,7 +1557,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   children: mainList.map((rawMain) {
                     final main = rawMain.toString();
                     final selected = _tagMain == main;
-                    final count = _countTag(docs, main, _all);
+                    final count = _countCategory(docs, main, _all);
                     return Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: ChoiceChip(
@@ -1440,7 +1606,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                             children: [_all, ...subList].map((rawSub) {
                               final sub = rawSub.toString();
                               final selected = _tagSub == sub;
-                              final count = _countTag(docs, _tagMain, sub);
+                              final count = _countCategory(docs, _tagMain, sub);
                               return Padding(
                                 padding: const EdgeInsets.only(right: 6),
                                 child: FilterChip(
@@ -1475,6 +1641,82 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         ),
                       ),
               ),
+              if (topHashtags.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      children: [
+                        if (_selectedHashtag.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: ActionChip(
+                              visualDensity: VisualDensity.compact,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              avatar: const Icon(
+                                Icons.close,
+                                size: 14,
+                                color: Colors.black54,
+                              ),
+                              label: const Text(
+                                'タグ解除',
+                                style: TextStyle(fontSize: 11),
+                              ),
+                              backgroundColor: Colors.grey.shade100,
+                              onPressed: () {
+                                setState(() => _selectedHashtag = '');
+                              },
+                            ),
+                          ),
+                        for (final rawH in topHashtags)
+                          Builder(
+                            builder: (_) {
+                              final h = rawH as Map;
+                              final tag = h['tag'].toString();
+                              final count = h['count'] as int;
+                              final selected = _selectedHashtag == tag;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: FilterChip(
+                                  label: Text('#$tag ($count)'),
+                                  selected: selected,
+                                  showCheckmark: false,
+                                  visualDensity: VisualDensity.compact,
+                                  materialTapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                  selectedColor: Colors.indigo.shade50,
+                                  backgroundColor: Colors.grey.shade50,
+                                  side: BorderSide(
+                                    color: selected
+                                        ? Colors.indigo
+                                        : Colors.grey.shade300,
+                                  ),
+                                  labelStyle: TextStyle(
+                                    fontSize: 12,
+                                    color: selected
+                                        ? Colors.indigo.shade800
+                                        : Colors.blue.shade800,
+                                    fontWeight: selected
+                                        ? FontWeight.bold
+                                        : FontWeight.w500,
+                                  ),
+                                  shape: const StadiumBorder(),
+                                  onSelected: (_) {
+                                    setState(() {
+                                      _selectedHashtag = selected ? '' : tag;
+                                    });
+                                  },
+                                ),
+                              );
+                            },
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1486,18 +1728,31 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        (_tagIcons[_tagMain] as IconData?) ??
-                            Icons.label_outline,
+                        _selectedHashtag.isNotEmpty
+                            ? Icons.tag
+                            : ((_tagIcons[_tagMain] as IconData?) ??
+                                  Icons.label_outline),
                         size: 48,
                         color: Colors.grey.shade300,
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        _tagSub == _all
-                            ? '「$_tagMain」の投稿はまだありません'
-                            : '「$_tagMain・$_tagSub」の投稿はまだありません',
+                        _selectedHashtag.isNotEmpty
+                            ? '「#$_selectedHashtag」に一致する投稿はありません'
+                            : (_tagSub == _all
+                                  ? '「$_tagMain」の投稿はまだありません'
+                                  : '「$_tagMain・$_tagSub」の投稿はまだありません'),
                         style: const TextStyle(color: Colors.grey),
                       ),
+                      if (_selectedHashtag.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        OutlinedButton(
+                          onPressed: () {
+                            setState(() => _selectedHashtag = '');
+                          },
+                          child: const Text('ハッシュタグ絞り込みを解除'),
+                        ),
+                      ],
                     ],
                   ),
                 )
@@ -1508,6 +1763,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   interestedTags: interestedTags,
                   lessInterestedTopics: lessInterestedTopics,
                   missingAppliances: missingAppliances,
+                  allergies: allergies,
                 ),
         ),
       ],
@@ -1521,6 +1777,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required List interestedTags,
     required List lessInterestedTopics,
     required List missingAppliances,
+    required List allergies,
   }) {
     if (docs.isEmpty) {
       return const Center(
@@ -1612,6 +1869,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                     isTopicDemoted: isTopicDemoted,
                     isMatchedInterest: isMatchedInterest,
                     missingAppliances: missingAppliances,
+                    allergies: allergies,
                   );
                 },
               ),
@@ -1630,6 +1888,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required bool isTopicDemoted,
     required bool isMatchedInterest,
     required List missingAppliances,
+    required List allergies,
   }) {
     final bool isRecipePost = post['isRecipePost'] == true;
     final int replies = _readReactionCount(post['replies'], const []);
@@ -1694,6 +1953,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
         : (post['content']?.toString() ?? '');
 
     final List postImages = _extractPostImages(docId, post);
+    final List postHashtags = SnsScreen.extractHashtagsFromPost(post);
 
     return StreamBuilder(
       stream: targetLookupUid.isNotEmpty
@@ -1742,6 +2002,18 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
             ? List.from(post['recipeIngredients'])
             : [];
         final String recipeSteps = post['recipeSteps']?.toString() ?? '';
+
+        List matchedAllergens = [];
+        if (isRecipePost && allergies.isNotEmpty) {
+          final ingText = recipeIngredients
+              .where((e) => e is Map)
+              .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}')
+              .join('\n');
+          matchedAllergens = AiChatScreen.findMatchedAllergens(
+            '${post['title'] ?? ''}\n$ingText\n$recipeSteps',
+            allergies,
+          );
+        }
 
         return InkWell(
           onTap: () {
@@ -1898,9 +2170,43 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                     post['content'].toString().trim().isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 6.0),
-                    child: Text(
-                      post['content'].toString(),
-                      style: const TextStyle(fontSize: 14, height: 1.4),
+                    child: _buildHighlightedContent(post['content'].toString()),
+                  ),
+                if (postHashtags.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final rawTag in postHashtags)
+                          InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () =>
+                                _selectHashtagAndJump(rawTag.toString()),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.indigo.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.indigo.shade100,
+                                ),
+                              ),
+                              child: Text(
+                                '#${rawTag.toString()}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.indigo.shade700,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 if (isRecipePost) ...[
@@ -1915,6 +2221,40 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (matchedAllergens.isNotEmpty)
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.red.shade50,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.red.shade200),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.warning_amber_rounded,
+                                  size: 15,
+                                  color: Colors.red.shade700,
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    'アレルギー設定食材（${matchedAllergens.join('・')}）を含む可能性があります',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.red.shade800,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         Wrap(
                           spacing: 12,
                           runSpacing: 4,
@@ -2047,6 +2387,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                                             allIngredients: recipeIngredients,
                                             missingAppliances:
                                                 missingAppliances,
+                                            allergies: allergies,
                                           ),
                                       style: TextButton.styleFrom(
                                         padding: const EdgeInsets.symmetric(

@@ -16,7 +16,8 @@ class AiChatScreen extends StatefulWidget {
 
   const AiChatScreen({super.key, this.initialPrompt, this.referencedPost});
 
-  static const String apiKey = '';
+  static const String apiKey =
+      '';
 
   static const List fallbackModels = [
     'gemini-3.5-flash-lite',
@@ -25,6 +26,220 @@ class AiChatScreen extends StatefulWidget {
     'gemini-2.5-flash',
     'gemini-3.5-flash',
   ];
+
+  static const List presetAllergens = [
+    '卵',
+    '乳',
+    '小麦',
+    'えび',
+    'かに',
+    'そば',
+    '落花生',
+    'くるみ',
+  ];
+
+  static const Map allergenKeywordMap = {
+    '卵': [
+      '卵',
+      'たまご',
+      'タマゴ',
+      '玉子',
+      '卵黄',
+      '卵白',
+      'マヨネーズ',
+      'オムライス',
+      'オムレツ',
+      '親子丼',
+      '茶碗蒸し',
+      'カルボナーラ',
+      'タルタル',
+      'プリン',
+      'かに玉',
+      '天津飯',
+    ],
+    '乳': [
+      '牛乳',
+      'ミルク',
+      'チーズ',
+      'バター',
+      '生クリーム',
+      'ヨーグルト',
+      'ホワイトソース',
+      'グラタン',
+      'クリームシチュー',
+      'クリームパスタ',
+      '粉チーズ',
+      'ピザ用チーズ',
+      'スライスチーズ',
+      'クリームチーズ',
+      'コンデンスミルク',
+      '練乳',
+      'スキムミルク',
+      'マーガリン',
+      '乳製品',
+    ],
+    '小麦': [
+      '小麦',
+      '薄力粉',
+      '強力粉',
+      '中力粉',
+      'パン粉',
+      '食パン',
+      'パン',
+      'パスタ',
+      'スパゲッティ',
+      'マカロニ',
+      'ペンネ',
+      'うどん',
+      'ラーメン',
+      '中華麺',
+      '焼きそば',
+      'そうめん',
+      'ひやむぎ',
+      '天ぷら粉',
+      'お好み焼き粉',
+      'ホットケーキ',
+      '餃子の皮',
+      'ワンタン',
+      'カレールー',
+      'シチュールー',
+      '醤油',
+      'しょうゆ',
+      'めんつゆ',
+      'オイスターソース',
+      'ウスターソース',
+      '中濃ソース',
+      'お好みソース',
+      '麩',
+    ],
+    'えび': ['えび', 'エビ', '海老', 'シュリンプ', '桜えび', '干しえび', 'エビチリ', 'エビマヨ', 'むきえび'],
+    'かに': ['かに', 'カニ', '蟹', 'カニカマ', 'かにかま', 'かに玉'],
+    'そば': ['そば', 'ソバ', '蕎麦'],
+    '落花生': ['落花生', 'ピーナッツ', 'ピーナツ', 'らっかせい', 'ジーマーミ'],
+    'くるみ': ['くるみ', 'クルミ', '胡桃', 'ウォールナッツ', 'ミックスナッツ'],
+  };
+
+  static List findMatchedAllergens(String text, List allergies) {
+    if (allergies.isEmpty || text.trim().isEmpty) return [];
+    final List matched = [];
+    final List lines = text.split('\n');
+
+    for (final rawAllergen in allergies) {
+      final allergen = rawAllergen.toString().trim();
+      if (allergen.isEmpty) continue;
+      final List keywords = allergenKeywordMap[allergen] is List
+          ? List.from(allergenKeywordMap[allergen])
+          : [allergen];
+
+      bool hit = false;
+      for (final rawLine in lines) {
+        String line = rawLine.toString().toLowerCase();
+        if (line.trim().isEmpty) continue;
+
+        if (allergen == '小麦' &&
+            (line.contains('小麦不使用') ||
+                line.contains('グルテンフリー') ||
+                line.contains('米粉'))) {
+          continue;
+        }
+        if (allergen == '卵' &&
+            (line.contains('卵不使用') || line.contains('卵なし'))) {
+          continue;
+        }
+        if (allergen == '乳' &&
+            (line.contains('乳不使用') ||
+                line.contains('豆乳') && !line.contains('牛乳'))) {
+          continue;
+        }
+        if (allergen == 'そば') {
+          line = line
+              .replaceAll('焼きそば', '')
+              .replaceAll('やきそば', '')
+              .replaceAll('中華そば', '')
+              .replaceAll('油そば', '')
+              .replaceAll('まぜそば', '')
+              .replaceAll('沖縄そば', '')
+              .replaceAll('かた焼きそば', '');
+        }
+        if (allergen == '乳') {
+          line = line
+              .replaceAll('豆乳', '')
+              .replaceAll('ココナッツミルク', '')
+              .replaceAll('アーモンドミルク', '')
+              .replaceAll('オーツミルク', '');
+        }
+
+        for (final rawKw in keywords) {
+          final kw = rawKw.toString().toLowerCase().trim();
+          if (kw.isNotEmpty && line.contains(kw)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) break;
+      }
+
+      if (hit && !matched.contains(allergen)) {
+        matched.add(allergen);
+      }
+    }
+    return matched;
+  }
+
+  static bool containsAllergen(String text, List allergies) {
+    return findMatchedAllergens(text, allergies).isNotEmpty;
+  }
+
+  static bool containsAllergenInRecipe({
+    required String title,
+    required List ingredients,
+    required String steps,
+    required List allergies,
+  }) {
+    if (allergies.isEmpty) return false;
+    final buffer = StringBuffer();
+    buffer.writeln(title);
+    for (final rawIng in ingredients) {
+      if (rawIng is Map) {
+        buffer.writeln('${rawIng['name'] ?? ''}${rawIng['amount'] ?? ''}');
+      } else {
+        buffer.writeln(rawIng.toString());
+      }
+    }
+    buffer.writeln(steps);
+    return containsAllergen(buffer.toString(), allergies);
+  }
+
+  static String buildAllergyPromptRule(List allergies) {
+    if (allergies.isEmpty) return '特になし';
+    final List details = [];
+    for (final raw in allergies) {
+      final a = raw.toString().trim();
+      if (a.isEmpty) continue;
+      if (a == '卵') {
+        details.add('卵（マヨネーズ・卵黄・卵白など卵由来加工品も含め厳禁）');
+      } else if (a == '乳') {
+        details.add('乳製品（牛乳・チーズ・バター・生クリーム・ヨーグルト・ホワイトソースも含め厳禁）');
+      } else if (a == '小麦') {
+        details.add(
+          '小麦（小麦粉・パン・パン粉・パスタ・うどん・ラーメン・中華麺・カレールー・通常の醤油やめんつゆも含め厳禁。塩・ごま油・酢・小麦不使用調味料などで代用すること）',
+        );
+      } else if (a == 'えび') {
+        details.add('えび（桜えび・干しえび等も含め厳禁）');
+      } else if (a == 'かに') {
+        details.add('かに（カニカマ等も含め厳禁）');
+      } else if (a == 'そば') {
+        details.add('そば（そば粉・蕎麦全般厳禁）');
+      } else if (a == '落花生') {
+        details.add('落花生・ピーナッツ全般厳禁');
+      } else if (a == 'くるみ') {
+        details.add('くるみ・ミックスナッツ類厳禁');
+      } else {
+        details.add('$a（関連加工品も含め厳禁）');
+      }
+    }
+    return details.join('、');
+  }
 
   @override
   State createState() => _AiChatScreenState();
@@ -41,6 +256,8 @@ class _AiChatScreenState extends State {
   bool _hasTriggeredInitialPrompt = false;
 
   final TextEditingController _areaController = TextEditingController();
+  final TextEditingController _customAllergyController =
+      TextEditingController();
   final List _cookingAppliances = [
     '電子レンジ',
     'オーブン',
@@ -51,6 +268,7 @@ class _AiChatScreenState extends State {
     '冷蔵庫',
   ];
   final List _missingAppliances = [];
+  final List _allergies = [];
   final List _blockedUsers = [];
   String _userArea = '';
   String _userName = 'あなた';
@@ -62,7 +280,7 @@ class _AiChatScreenState extends State {
       'label': '🍳 150円以下のスピード飯',
       'prompt': '150円以下で10分以内に作れる、洗い物が少ない節約レシピを教えて！',
     },
-    {'label': '🥬 余り物で1品作りたい', 'prompt': '冷蔵庫のよく余る余り物で作れるおすすめレシピ教えて！'},
+    {'label': '🥬 余り物で1品作りたい', 'prompt': '冷蔵庫に余りがちな野菜とお肉で作れる、簡単なおかずレシピを教えて！'},
     {'label': '💡 光熱費を削る裏技', 'prompt': '今の季節にすぐ実践できる、電気代・ガス代・水道代の効果的な節約術を教えて！'},
     {
       'label': '🧹 100均グッズで時短掃除',
@@ -83,6 +301,38 @@ class _AiChatScreenState extends State {
   bool _isLoading = false;
   String _loadingStatus = 'AIが回答を考えています...';
   Uint8List? _selectedImageBytes;
+
+  static const Set _genericSearchWords = {
+    '料理',
+    'レシピ',
+    '自炊',
+    '簡単',
+    '時短',
+    '節約',
+    '安い',
+    '低予算',
+    'コスパ',
+    'おすすめ',
+    '作り方',
+    '食べ物',
+    'ご飯',
+    'ごはん',
+    'おかず',
+    '1品',
+    '一品',
+    '一人暮らし',
+    '投稿',
+    'みんな',
+    '教えて',
+    'スピード飯',
+    '余り物',
+    '洗い物',
+    '掃除',
+    '収納',
+    '生活',
+    'その他',
+    'すべて',
+  };
 
   @override
   void initState() {
@@ -157,16 +407,132 @@ class _AiChatScreenState extends State {
     return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
+  void _addCustomAllergy() {
+    final raw = _customAllergyController.text.trim();
+    if (raw.isEmpty) return;
+    final parts = raw
+        .split(RegExp(r'[\s 、,・/]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty);
+    setState(() {
+      for (final p in parts) {
+        if (!_allergies.contains(p)) {
+          _allergies.add(p);
+        }
+      }
+      _customAllergyController.clear();
+    });
+  }
+
+  int _parsePostCostYen(Map post) {
+    final est = AiKnowledgeService.readIntField(post['estimatedCost']);
+    if (est > 0) return est;
+    final raw = (post['recipeCost'] ?? '').toString().replaceAll(',', '');
+    final match = RegExp(r'(\d+)').firstMatch(raw);
+    if (match != null) {
+      return int.tryParse(match.group(1) ?? '0') ?? 0;
+    }
+    return 0;
+  }
+
+  int _inferMaxBudgetYen(String userQuery, Map? plan) {
+    if (plan != null) {
+      final plannedMax = int.tryParse('${plan['maxBudgetYen'] ?? -1}') ?? -1;
+      if (plannedMax > 0) return plannedMax;
+    }
+    final normalized = userQuery.replaceAll(',', '');
+    final explicitMatch = RegExp(r'(\d+)\s*円\s*(?:以下|以内|まで|くらい|程度)')
+        .firstMatch(normalized);
+    if (explicitMatch != null) {
+      final parsed = int.tryParse(explicitMatch.group(1) ?? '0') ?? 0;
+      if (parsed > 0) return parsed;
+    }
+    if (userQuery.contains('節約') ||
+        userQuery.contains('安い') ||
+        userQuery.contains('高くない') ||
+        userQuery.contains('コスパ') ||
+        userQuery.contains('激安') ||
+        userQuery.contains('低予算')) {
+      return 500;
+    }
+    return -1;
+  }
+
+  bool _isCandidateRelevant({
+    required Map post,
+    required String userQuery,
+    required List searchTags,
+    required int maxBudgetYen,
+    required String preferredPriceTier,
+    required String explicitDocId,
+  }) {
+    final docId = (post['docId'] ?? '').toString();
+    if (docId.isEmpty) return false;
+    if (explicitDocId.isNotEmpty && docId == explicitDocId) return true;
+
+    if (_allergies.isNotEmpty) {
+      final ingText = _toMapList(post['recipeIngredients'])
+          .map((e) => '${(e as Map)['name'] ?? ''}${e['amount'] ?? ''}')
+          .join('\n');
+      final postAllergyTarget =
+          '${post['title'] ?? ''}\n${post['content'] ?? ''}\n$ingText\n${post['recipeSteps'] ?? ''}';
+      if (AiChatScreen.containsAllergen(postAllergyTarget, _allergies)) {
+        return false;
+      }
+    }
+
+    final int postCost = _parsePostCostYen(post);
+    if (maxBudgetYen > 0 && postCost > 0) {
+      final int allowedUpper = (maxBudgetYen * 1.3).round();
+      if (postCost > allowedUpper) return false;
+    }
+    if (preferredPriceTier == 'low' && postCost >= 600) {
+      return false;
+    }
+
+    final ingNames = _toMapList(post['recipeIngredients'])
+        .map((e) => ((e as Map)['name'] ?? '').toString())
+        .join(' ');
+    final searchableText =
+        '${post['title'] ?? ''}${post['content'] ?? ''} ${post['subCategory'] ?? ''}$ingNames'
+            .toLowerCase();
+
+    final List specificTags = [];
+    for (final rawTag in searchTags) {
+      final tag = rawTag.toString().trim();
+      if (tag.length >= 2 && !_genericSearchWords.contains(tag)) {
+        specificTags.add(tag.toLowerCase());
+      }
+    }
+
+    if (specificTags.isNotEmpty) {
+      final bool matchedAny = specificTags.any(
+        (tag) => searchableText.contains(tag.toString()),
+      );
+      if (!matchedAny) return false;
+    } else if (maxBudgetYen > 0 && postCost <= 0) {
+      final String tier = (post['priceTier'] ?? 'none').toString();
+      if (tier != 'low') return false;
+    }
+
+    return true;
+  }
+
   String _buildSystemPrompt() {
     final now = DateTime.now();
     final season = _getSeason(now.month);
     final missingText = _missingAppliances.isEmpty
         ? '特になし'
         : _missingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(_allergies);
     final areaText = _userArea.isEmpty ? '日本' : _userArea;
 
     return 'あなたは一人暮らしの頼れる相談相手であり、料理・家事・節約の実践知識が豊富なAIパートナーです。\n'
-        '相手：$_userNameさん / 時期：${now.year}年${now.month}月（$season） / 地域：$areaText / 持っていない家電：$missingText\n\n'
+        '相手：$_userNameさん / 時期：${now.year}年${now.month}月（$season） / 地域：$areaText / 持っていない家電：$missingText\n'
+        'アレルギー・食べられない食材（絶対厳禁）：$allergyRule\n\n'
+        '【最優先安全ルール（アレルギー厳禁）】\n'
+        '・アレルギー・食べられない食材（$allergyRule）は、レシピの材料・調味料・アレンジ提案・代替案のいずれにも絶対に含めないこと。\n'
+        '・もしユーザーがうっかりアレルギー食材を含む相談をした場合でも、その食材は使わず安全な代替食材だけで構成したレシピを提案すること。\n\n'
         '【話し方と基本ルール】\n'
         '・教科書の音読のような硬い解説や、「今回はレシピの相談ではないため〜」といったシステム説明は絶対に書かないこと。\n'
         '・「ぜひ試してみてくださいね！」のような毎回同じ定型締めは避け、相談に合った自然な一言で締めること。\n'
@@ -187,10 +553,11 @@ class _AiChatScreenState extends State {
         '美味しく作るコツやアレンジの一言\n\n'
         '【料理以外の相談（掃除・収納・光熱費・雑談など）のとき】\n'
         '・上のレシピ見出しは使わず、自然な会話文や簡潔な箇条書きで答えること。\n\n'
-        '【アプリ内投稿の扱い方】\n'
-        '・メッセージ末尾に「参考候補（アプリ内投稿）」が添えられることがあるが、あくまで補助資料。\n'
-        '・相談テーマにドンピシャで役立つ投稿があるときだけ、会話の中で自然に1〜2件だけ触れること。無関係な投稿は完全に無視すること。\n'
-        '・本当に参考にした投稿がある場合のみ、回答のいちばん最後の行だけに [REF:docId1,docId2] と出力すること（最大2件）。該当がなければ [REF:] 行は書かないこと。';
+        '【アプリ内投稿の厳格な扱い方】\n'
+        '・メッセージ末尾に「参考候補（アプリ内投稿）」が添えられることがあるが、相談の予算・食材・ジャンル・目的に明確に一致する投稿だけを採用すること。\n'
+        '・条件と合わない投稿（例：節約相談に対する高額な料理、材料や料理名が全く別の投稿、アレルギー食材を含む投稿）は完全に無視すること。\n'
+        '・回答本文の中で実際に「〇〇さんの『△△』」のように投稿者名や投稿名に触れて紹介した場合に限り、回答のいちばん最後の行だけに [REF:docId] を出力すること（最大2件）。\n'
+        '・回答本文の中で一度も紹介していない投稿の [REF:] は絶対に出力しないこと。該当がなければ [REF:] 行自体を書かないこと。';
   }
 
   void _initAiSession([String? modelName]) {
@@ -333,6 +700,12 @@ class _AiChatScreenState extends State {
                   .map((e) => e.toString())
                   .toList()
             : [];
+        final List savedAllergies = data['allergies'] is List
+            ? List.from(data['allergies'])
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toList()
+            : [];
         final List savedBlocked = data['blockedUsers'] is List
             ? List.from(data['blockedUsers']).map((e) => e.toString()).toList()
             : [];
@@ -348,6 +721,9 @@ class _AiChatScreenState extends State {
           _missingAppliances
             ..clear()
             ..addAll(savedMissing);
+          _allergies
+            ..clear()
+            ..addAll(savedAllergies);
           _blockedUsers
             ..clear()
             ..addAll(savedBlocked);
@@ -709,6 +1085,10 @@ class _AiChatScreenState extends State {
       return;
     }
 
+    if (_customAllergyController.text.trim().isNotEmpty) {
+      _addCustomAllergy();
+    }
+
     setState(() {
       _isCheckingSetup = true;
       _userArea = inputArea;
@@ -722,6 +1102,7 @@ class _AiChatScreenState extends State {
             .set({
               'area': _userArea,
               'missingAppliances': _missingAppliances,
+              'allergies': _allergies,
               'isAiSetupDone': true,
             }, SetOptions(merge: true));
       } catch (e) {}
@@ -729,13 +1110,18 @@ class _AiChatScreenState extends State {
 
     if (!mounted) return;
 
+    final allergyNote = _allergies.isEmpty
+        ? ''
+        : '（${_allergies.join('・')}を除外します）';
+
     setState(() {
       _isSetupComplete = true;
       _isCheckingSetup = false;
       if (_messages.isEmpty) {
         _messages.add({
           'role': 'ai',
-          'text': '設定ありがとうございます！$_userAreaの環境や家電に合わせてお答えしますね。何でも聞いてください。',
+          'text':
+              '設定ありがとうございます！$_userAreaの環境や家電に合わせてお答えしますね$allergyNote。何でも聞いてください。',
           'time': _formatNowTime(),
           'referencedPosts': [],
         });
@@ -782,7 +1168,9 @@ class _AiChatScreenState extends State {
     if (posts.isEmpty) return '';
     final buffer = StringBuffer();
     buffer.writeln('\n---');
-    buffer.writeln('参考候補（アプリ内投稿・関連する場合のみ任意で利用。無関係なら無視すること）：');
+    buffer.writeln(
+      '参考候補（アプリ内投稿・条件に明確に一致し本文で紹介する場合のみ使用。無関係なら完全に無視し[REF:]も書かないこと）：',
+    );
     for (int i = 0; i < posts.length; i++) {
       final p = posts[i] as Map;
       final docId = (p['docId'] ?? '').toString();
@@ -808,9 +1196,39 @@ class _AiChatScreenState extends State {
     return buffer.toString();
   }
 
-  Map _extractReferenceTag(String rawReply, List candidatePosts) {
+  bool _isMentionedInReply(String cleanReply, Map post) {
+    final lowerReply = cleanReply.toLowerCase();
+    final userName = (post['userName'] ?? '').toString().trim();
+    final title = (post['title'] ?? '').toString().trim();
+
+    if (userName.length >= 2 &&
+        userName != '名無し' &&
+        userName != 'ユーザー' &&
+        lowerReply.contains(userName.toLowerCase())) {
+      return true;
+    }
+    if (title.length >= 2 && lowerReply.contains(title.toLowerCase())) {
+      return true;
+    }
+    return false;
+  }
+
+  Map _extractReferenceTag(
+    String rawReply,
+    List candidatePosts, {
+    String explicitDocId = '',
+  }) {
     final regex = RegExp(r'\[REF:([^\]]*)\]');
     final match = regex.firstMatch(rawReply);
+
+    final fence = String.fromCharCodes([96, 96, 96]);
+    final cleanText = rawReply
+        .replaceAll(regex, '')
+        .replaceAll(fence, '')
+        .replaceAll('**', '')
+        .replaceAll('##', '')
+        .trim();
+
     final List selectedRefs = [];
 
     if (match != null) {
@@ -825,24 +1243,77 @@ class _AiChatScreenState extends State {
           final p = rawP as Map;
           if (p['docId'] == id &&
               !selectedRefs.any((r) => (r as Map)['docId'] == id)) {
-            selectedRefs.add(p);
+            final bool isExplicit =
+                explicitDocId.isNotEmpty && id == explicitDocId;
+            if (isExplicit || _isMentionedInReply(cleanText, p)) {
+              selectedRefs.add(p);
+            }
           }
         }
       }
     }
 
-    final fence = String.fromCharCodes([96, 96, 96]);
-    final cleanText = rawReply
-        .replaceAll(regex, '')
-        .replaceAll(fence, '')
-        .replaceAll('**', '')
-        .replaceAll('##', '')
-        .trim();
+    if (selectedRefs.isEmpty && explicitDocId.isNotEmpty) {
+      for (final rawP in candidatePosts) {
+        final p = rawP as Map;
+        if (p['docId'] == explicitDocId) {
+          selectedRefs.add(p);
+          break;
+        }
+      }
+    }
 
     return {
       'cleanText': cleanText,
       'referencedPosts': selectedRefs.take(2).toList(),
     };
+  }
+
+  Future _generateReplyWithFallback({
+    required String prompt,
+    Uint8List? imageBytes,
+    required String rawText,
+  }) async {
+    String? aiReply;
+    Object? lastError;
+
+    for (final candidateItem in AiChatScreen.fallbackModels) {
+      final candidateModel = candidateItem.toString();
+      try {
+        if (_chatSession == null || _activeModelName != candidateModel) {
+          _initAiSession(candidateModel);
+        }
+
+        GenerateContentResponse response;
+        if (imageBytes != null) {
+          final promptText = rawText.isEmpty
+              ? 'この画像を見て、食材ならおすすめレシピを【料理名】【目安時間】【目安費用】【材料】【作り方】【ポイント】の形式で、汚れや日用品なら実践的な対処法を自然な言葉で教えてください。'
+              : prompt;
+          response = await _model!
+              .generateContent([
+                Content.multi([
+                  TextPart(promptText),
+                  DataPart('image/jpeg', imageBytes),
+                ]),
+              ])
+              .timeout(const Duration(seconds: 25));
+        } else {
+          response = await _chatSession!
+              .sendMessage(Content.text(prompt))
+              .timeout(const Duration(seconds: 25));
+        }
+
+        if (response.text != null && response.text!.trim().isNotEmpty) {
+          aiReply = response.text!.trim();
+          break;
+        }
+      } catch (e) {
+        lastError = e;
+        _chatSession = null;
+      }
+    }
+
+    return {'reply': aiReply, 'error': lastError};
   }
 
   Future _sendMessage([String? presetText, Map? explicitContextPost]) async {
@@ -885,6 +1356,9 @@ class _AiChatScreenState extends State {
     });
     _scrollToBottom();
 
+    final String explicitDocId = explicitContextPost != null
+        ? (explicitContextPost['docId'] ?? '').toString()
+        : '';
     final List retrievedPosts = [];
     if (explicitContextPost != null) {
       retrievedPosts.add(explicitContextPost);
@@ -904,16 +1378,19 @@ class _AiChatScreenState extends State {
             });
           }
 
+          final List planTags = rawPlan['searchTags'] is List
+              ? List.from(rawPlan['searchTags'])
+              : const [];
+          final String preferredPriceTier =
+              (rawPlan['preferredPriceTier'] ?? 'any').toString();
+          final int maxBudgetYen = _inferMaxBudgetYen(rawText, rawPlan);
+
           final rawFound =
               await AiKnowledgeService.searchRelevantCommunityPosts(
-                searchTags: rawPlan['searchTags'] is List
-                    ? List.from(rawPlan['searchTags'])
-                    : const [],
+                searchTags: planTags,
                 category: (rawPlan['category'] ?? 'すべて').toString(),
-                preferredPriceTier: (rawPlan['preferredPriceTier'] ?? 'any')
-                    .toString(),
-                maxBudgetYen:
-                    int.tryParse('${rawPlan['maxBudgetYen'] ?? -1}') ?? -1,
+                preferredPriceTier: preferredPriceTier,
+                maxBudgetYen: maxBudgetYen,
                 missingAppliances: _missingAppliances,
                 currentUserId: _currentUserId,
                 blockedUsers: _blockedUsers,
@@ -925,6 +1402,14 @@ class _AiChatScreenState extends State {
               if (item is Map &&
                   !retrievedPosts.any(
                     (e) => (e as Map)['docId'] == item['docId'],
+                  ) &&
+                  _isCandidateRelevant(
+                    post: item,
+                    userQuery: rawText,
+                    searchTags: planTags,
+                    maxBudgetYen: maxBudgetYen,
+                    preferredPriceTier: preferredPriceTier,
+                    explicitDocId: explicitDocId,
                   )) {
                 retrievedPosts.add(item);
               }
@@ -943,46 +1428,46 @@ class _AiChatScreenState extends State {
     final String communityContext = _formatCommunityPostsForPrompt(
       retrievedPosts,
     );
-    final String finalPrompt = communityContext.isEmpty
-        ? rawText
-        : '$rawText$communityContext';
+    final String allergyReminder = _allergies.isEmpty
+        ? ''
+        : '\n（※重要：アレルギー設定により【${AiChatScreen.buildAllergyPromptRule(_allergies)}】は絶対に使用禁止です）';
+    final String finalPrompt = '$rawText$allergyReminder$communityContext';
 
-    String? aiReply;
-    Object? lastError;
+    Map genResult = await _generateReplyWithFallback(
+      prompt: finalPrompt,
+      imageBytes: imageBytes,
+      rawText: rawText,
+    );
 
-    for (final candidateItem in AiChatScreen.fallbackModels) {
-      final candidateModel = candidateItem.toString();
-      try {
-        if (_chatSession == null || _activeModelName != candidateModel) {
-          _initAiSession(candidateModel);
+    String? aiReply = genResult['reply'] as String?;
+    Object? lastError = genResult['error'];
+
+    if (aiReply != null && _allergies.isNotEmpty) {
+      final parsedCheck = _parseAiSuggestion(aiReply);
+      if (parsedCheck['isRecipe'] == true &&
+          AiChatScreen.containsAllergenInRecipe(
+            title: (parsedCheck['title'] ?? '').toString(),
+            ingredients: parsedCheck['ingredients'] is List
+                ? List.from(parsedCheck['ingredients'])
+                : const [],
+            steps: (parsedCheck['steps'] ?? '').toString(),
+            allergies: _allergies,
+          )) {
+        if (mounted) {
+          setState(() {
+            _loadingStatus = '🛡️ アレルギー食材を除外してレシピを再作成しています...';
+          });
         }
-
-        GenerateContentResponse response;
-        if (imageBytes != null) {
-          final promptText = rawText.isEmpty
-              ? 'この画像を見て、食材ならおすすめレシピを【料理名】【目安時間】【目安費用】【材料】【作り方】【ポイント】の形式で、汚れや日用品なら実践的な対処法を自然な言葉で教えてください。'
-              : finalPrompt;
-          response = await _model!
-              .generateContent([
-                Content.multi([
-                  TextPart(promptText),
-                  DataPart('image/jpeg', imageBytes),
-                ]),
-              ])
-              .timeout(const Duration(seconds: 25));
-        } else {
-          response = await _chatSession!
-              .sendMessage(Content.text(finalPrompt))
-              .timeout(const Duration(seconds: 25));
+        final retryPrompt =
+            '直前の提案にアレルギー対象食材（${AiChatScreen.buildAllergyPromptRule(_allergies)}）が含まれていました。'
+            'それらおよび関連加工品・調味料を一切使わず、安全な食材だけで先ほどの相談（$rawText）に合う別レシピを【料理名】【目安時間】【目安費用】【材料】【作り方】【ポイント】の形式で作り直してください。';
+        final retryRes = await _generateReplyWithFallback(
+          prompt: retryPrompt,
+          rawText: retryPrompt,
+        );
+        if (retryRes['reply'] is String) {
+          aiReply = retryRes['reply'] as String;
         }
-
-        if (response.text != null && response.text!.trim().isNotEmpty) {
-          aiReply = response.text!.trim();
-          break;
-        }
-      } catch (e) {
-        lastError = e;
-        _chatSession = null;
       }
     }
 
@@ -991,10 +1476,29 @@ class _AiChatScreenState extends State {
     setState(() {
       _isLoading = false;
       if (aiReply != null) {
-        final extracted = _extractReferenceTag(aiReply, retrievedPosts);
+        final extracted = _extractReferenceTag(
+          aiReply,
+          retrievedPosts,
+          explicitDocId: explicitDocId,
+        );
+        String finalText = (extracted['cleanText'] ?? '').toString();
+        final parsedFinal = _parseAiSuggestion(finalText);
+        if (_allergies.isNotEmpty &&
+            parsedFinal['isRecipe'] == true &&
+            AiChatScreen.containsAllergenInRecipe(
+              title: (parsedFinal['title'] ?? '').toString(),
+              ingredients: parsedFinal['ingredients'] is List
+                  ? List.from(parsedFinal['ingredients'])
+                  : const [],
+              steps: (parsedFinal['steps'] ?? '').toString(),
+              allergies: _allergies,
+            )) {
+          finalText =
+              '設定中のアレルギー食材（${_allergies.join('・')}）を含むレシピが生成されたため表示をブロックしました。使いたい安全な食材を指定してもう一度聞いてみてください。';
+        }
         _messages.add({
           'role': 'ai',
-          'text': (extracted['cleanText'] ?? '').toString(),
+          'text': finalText,
           'time': _formatNowTime(),
           'referencedPosts': extracted['referencedPosts'],
         });
@@ -1197,12 +1701,13 @@ class _AiChatScreenState extends State {
     final missingText = _missingAppliances.isEmpty
         ? '特になし'
         : _missingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(_allergies);
 
     final prompt = targetIngredient != null
         ? '料理「$dishTitle」（材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
-              '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
         : '料理「$dishTitle」（材料：$ingNames）について、\n'
-              '持っていない調理家電【$missingText】を使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
 
     String replyText = '代用案を取得できませんでした。もう一度お試しください。';
 
@@ -1546,6 +2051,13 @@ class _AiChatScreenState extends State {
             const SizedBox(height: 4),
             Text(steps, style: const TextStyle(fontSize: 13, height: 1.45)),
           ],
+          if (_allergies.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              '※除外設定（${_allergies.join('・')}）を反映済み。市販の調味料・加工品は必ず成分表示をご確認ください。',
+              style: TextStyle(fontSize: 10, color: Colors.orange.shade900),
+            ),
+          ],
         ],
       ),
     );
@@ -1685,6 +2197,7 @@ class _AiChatScreenState extends State {
   @override
   void dispose() {
     _areaController.dispose();
+    _customAllergyController.dispose();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -1729,7 +2242,7 @@ class _AiChatScreenState extends State {
             onPressed: _startNewChatSession,
           ),
           IconButton(
-            tooltip: '地域・家電の設定を変更',
+            tooltip: '地域・家電・アレルギー設定',
             icon: const Icon(Icons.tune),
             onPressed: () {
               setState(() {
@@ -1741,6 +2254,51 @@ class _AiChatScreenState extends State {
       ),
       body: Column(
         children: [
+          if (_allergies.isNotEmpty)
+            InkWell(
+              onTap: () {
+                setState(() {
+                  _isSetupComplete = false;
+                });
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 6,
+                ),
+                color: Colors.red.shade50,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.no_food_outlined,
+                      size: 15,
+                      color: Colors.red.shade700,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'アレルギー除外中: ${_allergies.join('・')}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.red.shade800,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '変更',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.red.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2054,13 +2612,17 @@ class _AiChatScreenState extends State {
   }
 
   Widget _buildSetupView() {
+    final List customAllergies = _allergies
+        .where((a) => !AiChatScreen.presetAllergens.contains(a))
+        .toList();
+
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.menu),
           onPressed: () => Scaffold.of(context).openDrawer(),
         ),
-        title: const Text('AIサポートの初期設定'),
+        title: const Text('AIサポートの設定'),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
@@ -2068,7 +2630,7 @@ class _AiChatScreenState extends State {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'あなたの環境に合わせたアドバイスをするために、2つだけ教えてください！',
+              'あなたの環境に合わせて安全に提案するため、設定してください！',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 24),
@@ -2117,6 +2679,90 @@ class _AiChatScreenState extends State {
                   ),
               ],
             ),
+            const SizedBox(height: 24),
+            const Text(
+              '3. アレルギー・食べられない食材（任意・複数選択可）',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '選択・追加した食材を含むレシピは、AI相談でもレシピ提案でも自動で除外されます。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final rawAllergen in AiChatScreen.presetAllergens)
+                  FilterChip(
+                    label: Text(rawAllergen.toString()),
+                    selected: _allergies.contains(rawAllergen.toString()),
+                    selectedColor: Colors.red.shade100,
+                    checkmarkColor: Colors.red.shade800,
+                    onSelected: (selected) {
+                      final allergen = rawAllergen.toString();
+                      setState(() {
+                        if (selected) {
+                          if (!_allergies.contains(allergen)) {
+                            _allergies.add(allergen);
+                          }
+                        } else {
+                          _allergies.remove(allergen);
+                        }
+                      });
+                    },
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _customAllergyController,
+                    decoration: const InputDecoration(
+                      hintText: 'その他のアレルギー・苦手食材（例：大豆、ごま、さば）',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _addCustomAllergy(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _addCustomAllergy,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('追加'),
+                ),
+              ],
+            ),
+            if (customAllergies.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final rawCustom in customAllergies)
+                    InputChip(
+                      label: Text(
+                        rawCustom.toString(),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.red.shade900,
+                        ),
+                      ),
+                      backgroundColor: Colors.red.shade50,
+                      deleteIconColor: Colors.red.shade700,
+                      onDeleted: () {
+                        setState(() {
+                          _allergies.remove(rawCustom.toString());
+                        });
+                      },
+                    ),
+                ],
+              ),
+            ],
             const SizedBox(height: 32),
             SizedBox(
               width: double.infinity,
