@@ -39,6 +39,7 @@ class _BudgetScreenState extends State {
   int _monthlyIncome = 0;
   int _payday = 25;
   List _latestRecords = [];
+  Map _memoByDocId = {};
   List _largeExpenses = [];
 
   late final Stream _recordsStream = FirebaseFirestore.instance
@@ -138,10 +139,15 @@ class _BudgetScreenState extends State {
                   itemCount: expenses.length,
                   itemBuilder: (context, index) {
                     final item = expenses[index] as MoneyRecordModel;
+                    final memo = (_memoByDocId[item.id] ?? '').toString();
                     return Card(
                       margin: const EdgeInsets.symmetric(vertical: 4),
                       child: ListTile(
-                        title: Text('カテゴリ: ${item.category}'),
+                        title: Text(
+                          memo.isNotEmpty
+                              ? '${item.category}（$memo）'
+                              : 'カテゴリ: ${item.category}',
+                        ),
                         subtitle: Text('金額: ¥${_formatCurrency(item.amount)}'),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
@@ -189,6 +195,9 @@ class _BudgetScreenState extends State {
 
   void _showEditItemModal(MoneyRecordModel item) {
     final controller = TextEditingController(text: item.amount.toString());
+    final memoController = TextEditingController(
+      text: (_memoByDocId[item.id] ?? '').toString(),
+    );
     String selectedCategory = item.category;
 
     final dateParts = item.date.split('-');
@@ -252,6 +261,14 @@ class _BudgetScreenState extends State {
                       prefixText: '¥ ',
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: memoController,
+                    decoration: const InputDecoration(
+                      labelText: '詳細・メモ（任意）',
+                      hintText: '例：スーパーで豚肉と卵、コンビニなど',
+                    ),
+                  ),
                   const SizedBox(height: 16),
                   const Text(
                     'カテゴリ',
@@ -298,6 +315,7 @@ class _BudgetScreenState extends State {
                           'amount': amount,
                           'category': selectedCategory,
                           'date': newDateStr,
+                          'memo': memoController.text.trim(),
                         });
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -308,7 +326,10 @@ class _BudgetScreenState extends State {
           );
         },
       ),
-    );
+    ).then((_) {
+      controller.dispose();
+      memoController.dispose();
+    });
   }
 
   void _showInputModal(int year, int month, int day, {int? initialAmount}) {
@@ -317,6 +338,7 @@ class _BudgetScreenState extends State {
       rows.add({
         'category': '食費',
         'amountCtrl': TextEditingController(text: initialAmount.toString()),
+        'memoCtrl': TextEditingController(),
         'focusNode': FocusNode(),
       });
     }
@@ -364,6 +386,7 @@ class _BudgetScreenState extends State {
               rows.add({
                 'category': category,
                 'amountCtrl': TextEditingController(),
+                'memoCtrl': TextEditingController(),
                 'focusNode': focusNode,
               });
             });
@@ -376,12 +399,14 @@ class _BudgetScreenState extends State {
             setDialogState(() {
               final removed = rows.removeAt(index) as Map;
               (removed['amountCtrl'] as TextEditingController).dispose();
+              (removed['memoCtrl'] as TextEditingController).dispose();
               (removed['focusNode'] as FocusNode).dispose();
             });
           }
 
           final validCount = calcValidCount();
           final validTotal = calcValidTotal();
+          final isWide = MediaQuery.of(ctx).size.width >= 560;
 
           return AlertDialog(
             title: Text('$month月$day日の支出追加'),
@@ -389,7 +414,7 @@ class _BudgetScreenState extends State {
               width: double.maxFinite,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(ctx).size.height * 0.56,
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.58,
                 ),
                 child: SingleChildScrollView(
                   child: Column(
@@ -465,81 +490,127 @@ class _BudgetScreenState extends State {
                               final selectedCat = row['category'].toString();
                               final ctrl =
                                   row['amountCtrl'] as TextEditingController;
+                              final memoCtrl =
+                                  row['memoCtrl'] as TextEditingController;
                               final focusNode = row['focusNode'] as FocusNode;
 
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 8.0),
-                                child: Row(
+                              final categoryDropdown = Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.shade50,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: Colors.blue.shade200,
+                                  ),
+                                ),
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton(
+                                    value: selectedCat,
+                                    isDense: true,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue.shade900,
+                                    ),
+                                    items: _categories.map((c) {
+                                      final str = c.toString();
+                                      return DropdownMenuItem(
+                                        value: str,
+                                        child: Text(str),
+                                      );
+                                    }).toList(),
+                                    onChanged: (val) {
+                                      if (val != null) {
+                                        setDialogState(() {
+                                          row['category'] = val.toString();
+                                        });
+                                      }
+                                    },
+                                  ),
+                                ),
+                              );
+
+                              final amountField = TextField(
+                                controller: ctrl,
+                                focusNode: focusNode,
+                                keyboardType: TextInputType.number,
+                                onChanged: (_) => setDialogState(() {}),
+                                decoration: const InputDecoration(
+                                  hintText: '金額',
+                                  prefixText: '¥ ',
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 10,
+                                  ),
+                                  border: OutlineInputBorder(),
+                                ),
+                              );
+
+                              final memoField = TextField(
+                                controller: memoCtrl,
+                                decoration: const InputDecoration(
+                                  hintText: '詳細・メモ（任意 例：スーパー、カフェ）',
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 10,
+                                  ),
+                                  border: OutlineInputBorder(),
+                                ),
+                              );
+
+                              final deleteBtn = IconButton(
+                                icon: const Icon(
+                                  Icons.remove_circle,
+                                  color: Colors.redAccent,
+                                  size: 22,
+                                ),
+                                constraints: const BoxConstraints(),
+                                padding: const EdgeInsets.only(left: 6),
+                                onPressed: isSaving ? null : () => removeRow(i),
+                              );
+
+                              if (isWide) {
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 8.0),
+                                  child: Row(
+                                    children: [
+                                      categoryDropdown,
+                                      const SizedBox(width: 8),
+                                      Expanded(flex: 2, child: amountField),
+                                      const SizedBox(width: 8),
+                                      Expanded(flex: 3, child: memoField),
+                                      deleteBtn,
+                                    ],
+                                  ),
+                                );
+                              }
+
+                              return Container(
+                                margin: const EdgeInsets.only(bottom: 8.0),
+                                padding: const EdgeInsets.all(8.0),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: Colors.grey.shade300,
+                                  ),
+                                ),
+                                child: Column(
                                   children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.blue.shade50,
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: Border.all(
-                                          color: Colors.blue.shade200,
-                                        ),
-                                      ),
-                                      child: DropdownButtonHideUnderline(
-                                        child: DropdownButton(
-                                          value: selectedCat,
-                                          isDense: true,
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.blue.shade900,
-                                          ),
-                                          items: _categories.map((c) {
-                                            final str = c.toString();
-                                            return DropdownMenuItem(
-                                              value: str,
-                                              child: Text(str),
-                                            );
-                                          }).toList(),
-                                          onChanged: (val) {
-                                            if (val != null) {
-                                              setDialogState(() {
-                                                row['category'] = val
-                                                    .toString();
-                                              });
-                                            }
-                                          },
-                                        ),
-                                      ),
+                                    Row(
+                                      children: [
+                                        categoryDropdown,
+                                        const SizedBox(width: 8),
+                                        Expanded(child: amountField),
+                                        deleteBtn,
+                                      ],
                                     ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: TextField(
-                                        controller: ctrl,
-                                        focusNode: focusNode,
-                                        keyboardType: TextInputType.number,
-                                        onChanged: (_) => setDialogState(() {}),
-                                        decoration: const InputDecoration(
-                                          hintText: '金額',
-                                          prefixText: '¥ ',
-                                          isDense: true,
-                                          contentPadding: EdgeInsets.symmetric(
-                                            horizontal: 10,
-                                            vertical: 10,
-                                          ),
-                                          border: OutlineInputBorder(),
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.remove_circle,
-                                        color: Colors.redAccent,
-                                        size: 22,
-                                      ),
-                                      constraints: const BoxConstraints(),
-                                      padding: const EdgeInsets.only(left: 6),
-                                      onPressed: isSaving
-                                          ? null
-                                          : () => removeRow(i),
-                                    ),
+                                    const SizedBox(height: 6),
+                                    memoField,
                                   ],
                                 ),
                               );
@@ -594,6 +665,9 @@ class _BudgetScreenState extends State {
                                       .trim(),
                                 ) ??
                                 0;
+                            final memo =
+                                (m['memoCtrl'] as TextEditingController).text
+                                    .trim();
                             if (amt > 0) {
                               savedCount++;
                               savedTotal += amt;
@@ -604,7 +678,12 @@ class _BudgetScreenState extends State {
                                 category: m['category'].toString(),
                                 date: dateStr,
                               );
-                              batch.set(col.doc(), newRecord.toMap());
+                              final Map<String, dynamic> data =
+                                  Map<String, dynamic>.from(newRecord.toMap());
+                              if (memo.isNotEmpty) {
+                                data['memo'] = memo;
+                              }
+                              batch.set(col.doc(), data);
                             }
                           }
 
@@ -635,6 +714,7 @@ class _BudgetScreenState extends State {
       for (final raw in rows) {
         final m = raw as Map;
         (m['amountCtrl'] as TextEditingController).dispose();
+        (m['memoCtrl'] as TextEditingController).dispose();
         (m['focusNode'] as FocusNode).dispose();
       }
     });
@@ -680,6 +760,7 @@ class _BudgetScreenState extends State {
         selectedYear: _selectedYear,
         selectedMonth: _selectedMonth,
         allRecords: List.from(_latestRecords),
+        memoByDocId: Map.from(_memoByDocId),
         largeExpenses: List.from(_largeExpenses),
         initialTab: initialTab,
         onSavedDate: (year, month) {
@@ -801,10 +882,20 @@ class _BudgetScreenState extends State {
           final recordDocs = recordSnap.hasData && recordSnap.data != null
               ? (recordSnap.data as QuerySnapshot).docs
               : const [];
-          final List allRecords = recordDocs
-              .map((doc) => MoneyRecordModel.fromFirestore(doc))
-              .toList();
+          final List allRecords = [];
+          final Map memoMap = {};
+          for (final doc in recordDocs) {
+            allRecords.add(MoneyRecordModel.fromFirestore(doc));
+            final rawData = doc.data();
+            if (rawData is Map && rawData['memo'] != null) {
+              final m = rawData['memo'].toString().trim();
+              if (m.isNotEmpty) {
+                memoMap[doc.id] = m;
+              }
+            }
+          }
           _latestRecords = allRecords;
+          _memoByDocId = memoMap;
 
           return StreamBuilder(
             stream: _largeExpensesStream,
@@ -1807,6 +1898,7 @@ class _BudgetAiAssistantSheet extends StatefulWidget {
   final int selectedYear;
   final int selectedMonth;
   final List allRecords;
+  final Map memoByDocId;
   final List largeExpenses;
   final int initialTab;
   final void Function(int year, int month) onSavedDate;
@@ -1818,6 +1910,7 @@ class _BudgetAiAssistantSheet extends StatefulWidget {
     required this.selectedYear,
     required this.selectedMonth,
     required this.allRecords,
+    required this.memoByDocId,
     required this.largeExpenses,
     required this.initialTab,
     required this.onSavedDate,
@@ -1871,6 +1964,7 @@ class _BudgetAiAssistantSheetState extends State {
     for (final raw in _draftRecords) {
       final m = raw as Map;
       (m['amountCtrl'] as TextEditingController).dispose();
+      (m['memoCtrl'] as TextEditingController).dispose();
       (m['focusNode'] as FocusNode).dispose();
     }
     for (final raw in _draftLargeExpenses) {
@@ -1899,8 +1993,8 @@ class _BudgetAiAssistantSheetState extends State {
       _draftRecords.add({
         'date': _defaultEntryDate(),
         'category': category,
-        'memo': '',
         'amountCtrl': TextEditingController(),
+        'memoCtrl': TextEditingController(),
         'focusNode': focusNode,
       });
     });
@@ -2092,7 +2186,12 @@ class _BudgetAiAssistantSheetState extends State {
         currentSpent += r.amount;
         currentByCategory[r.category] =
             ((currentByCategory[r.category] as int?) ?? 0) + r.amount;
-        currentDetails.add('${r.date} ${r.category} ${r.amount}円');
+        final memo = (_w.memoByDocId[r.id] ?? '').toString();
+        currentDetails.add(
+          memo.isNotEmpty
+              ? '${r.date} ${r.category} ${r.amount}円 ($memo)'
+              : '${r.date} ${r.category} ${r.amount}円',
+        );
       } else if (r.date.startsWith(prevPrefix)) {
         prevSpent += r.amount;
         prevByCategory[r.category] =
@@ -2239,8 +2338,10 @@ class _BudgetAiAssistantSheetState extends State {
         _draftRecords.add({
           'date': dt,
           'category': _normalizeCategory((item['category'] ?? '食費').toString()),
-          'memo': (item['memo'] ?? '').toString(),
           'amountCtrl': TextEditingController(text: amt.toString()),
+          'memoCtrl': TextEditingController(
+            text: (item['memo'] ?? '').toString().trim(),
+          ),
           'focusNode': FocusNode(),
         });
         addedCount++;
@@ -2283,7 +2384,7 @@ class _BudgetAiAssistantSheetState extends State {
       return;
     }
 
-    final List validRecords = [];
+    final List validRecordMaps = [];
     final List validLarge = [];
     DateTime? latestRecordDate;
 
@@ -2296,18 +2397,24 @@ class _BudgetAiAssistantSheetState extends State {
                 .trim(),
           ) ??
           0;
+      final memo = (m['memoCtrl'] as TextEditingController).text.trim();
       if (amt > 0) {
         final dt = m['date'] as DateTime;
         latestRecordDate = dt;
-        validRecords.add(
-          MoneyRecordModel(
-            id: '',
-            userId: _w.currentUserId,
-            amount: amt,
-            category: m['category'].toString(),
-            date: _formatDateKey(dt),
-          ),
+        final rec = MoneyRecordModel(
+          id: '',
+          userId: _w.currentUserId,
+          amount: amt,
+          category: m['category'].toString(),
+          date: _formatDateKey(dt),
         );
+        final Map<String, dynamic> data = Map<String, dynamic>.from(
+          rec.toMap(),
+        );
+        if (memo.isNotEmpty) {
+          data['memo'] = memo;
+        }
+        validRecordMaps.add(data);
       }
     }
 
@@ -2334,7 +2441,7 @@ class _BudgetAiAssistantSheetState extends State {
       }
     }
 
-    final totalCount = validRecords.length + validLarge.length;
+    final totalCount = validRecordMaps.length + validLarge.length;
     if (totalCount == 0) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('登録できる明細がありません')));
@@ -2350,8 +2457,8 @@ class _BudgetAiAssistantSheetState extends State {
       final recordCol = FirebaseFirestore.instance.collection('money_record');
       final largeCol = FirebaseFirestore.instance.collection('large_expenses');
 
-      for (final rec in validRecords) {
-        batch.set(recordCol.doc(), (rec as MoneyRecordModel).toMap());
+      for (final data in validRecordMaps) {
+        batch.set(recordCol.doc(), data as Map<String, dynamic>);
       }
       for (final exp in validLarge) {
         batch.set(largeCol.doc(), (exp as LargeExpenseModel).toMap());
@@ -2525,13 +2632,14 @@ class _BudgetAiAssistantSheetState extends State {
   Widget _buildAutoInputTab(ScrollController scrollCtrl) {
     final validCount = _countValidDrafts();
     final recordSum = _sumValidDraftRecords();
+    final isWide = MediaQuery.of(context).size.width >= 560;
 
     return ListView(
       controller: scrollCtrl,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
       children: [
         const Text(
-          'タグをタップして1個ずつ追加（金額入力）',
+          'タグをタップして1個ずつ追加（金額・詳細入力）',
           style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
@@ -2697,9 +2805,121 @@ class _BudgetAiAssistantSheetState extends State {
                 final item = _draftRecords[i] as Map;
                 final dt = item['date'] as DateTime;
                 final ctrl = item['amountCtrl'] as TextEditingController;
+                final memoCtrl = item['memoCtrl'] as TextEditingController;
                 final focusNode = item['focusNode'] as FocusNode;
                 final selectedCat = item['category'].toString();
-                final memo = (item['memo'] ?? '').toString();
+
+                final dateChip = InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: dt,
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2035),
+                    );
+                    if (picked != null) {
+                      setState(() => item['date'] = picked);
+                    }
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '${dt.month}/${dt.day}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                );
+
+                final catDropdown = Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.blue.shade200),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton(
+                      value: selectedCat,
+                      isDense: true,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue.shade900,
+                      ),
+                      items: _categories.map((c) {
+                        final str = c.toString();
+                        return DropdownMenuItem(value: str, child: Text(str));
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            item['category'] = val.toString();
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                );
+
+                final amountField = TextField(
+                  controller: ctrl,
+                  focusNode: focusNode,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    hintText: '金額',
+                    prefixText: '¥ ',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    border: OutlineInputBorder(),
+                  ),
+                );
+
+                final memoField = TextField(
+                  controller: memoCtrl,
+                  decoration: const InputDecoration(
+                    hintText: '詳細・メモ（任意）',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    border: OutlineInputBorder(),
+                  ),
+                );
+
+                final removeBtn = IconButton(
+                  icon: const Icon(
+                    Icons.remove_circle,
+                    size: 21,
+                    color: Colors.redAccent,
+                  ),
+                  constraints: const BoxConstraints(),
+                  padding: const EdgeInsets.only(left: 6),
+                  onPressed: () {
+                    setState(() {
+                      final removed = _draftRecords.removeAt(i) as Map;
+                      (removed['amountCtrl'] as TextEditingController)
+                          .dispose();
+                      (removed['memoCtrl'] as TextEditingController).dispose();
+                      (removed['focusNode'] as FocusNode).dispose();
+                    });
+                  },
+                );
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 8),
@@ -2709,128 +2929,36 @@ class _BudgetAiAssistantSheetState extends State {
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(color: Colors.grey.shade300),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          InkWell(
-                            borderRadius: BorderRadius.circular(6),
-                            onTap: () async {
-                              final picked = await showDatePicker(
-                                context: context,
-                                initialDate: dt,
-                                firstDate: DateTime(2020),
-                                lastDate: DateTime(2035),
-                              );
-                              if (picked != null) {
-                                setState(() => item['date'] = picked);
-                              }
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 5,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.grey.shade100,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                '${dt.month}/${dt.day}',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                  child: isWide
+                      ? Row(
+                          children: [
+                            dateChip,
+                            const SizedBox(width: 6),
+                            catDropdown,
+                            const SizedBox(width: 6),
+                            Expanded(flex: 2, child: amountField),
+                            const SizedBox(width: 6),
+                            Expanded(flex: 3, child: memoField),
+                            removeBtn,
+                          ],
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                dateChip,
+                                const SizedBox(width: 6),
+                                catDropdown,
+                                const SizedBox(width: 6),
+                                Expanded(child: amountField),
+                                removeBtn,
+                              ],
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            decoration: BoxDecoration(
-                              color: Colors.blue.shade50,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: Colors.blue.shade200),
-                            ),
-                            child: DropdownButtonHideUnderline(
-                              child: DropdownButton(
-                                value: selectedCat,
-                                isDense: true,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue.shade900,
-                                ),
-                                items: _categories.map((c) {
-                                  final str = c.toString();
-                                  return DropdownMenuItem(
-                                    value: str,
-                                    child: Text(str),
-                                  );
-                                }).toList(),
-                                onChanged: (val) {
-                                  if (val != null) {
-                                    setState(() {
-                                      item['category'] = val.toString();
-                                    });
-                                  }
-                                },
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: TextField(
-                              controller: ctrl,
-                              focusNode: focusNode,
-                              keyboardType: TextInputType.number,
-                              onChanged: (_) => setState(() {}),
-                              decoration: const InputDecoration(
-                                hintText: '金額',
-                                prefixText: '¥ ',
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 8,
-                                ),
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(
-                              Icons.remove_circle,
-                              size: 21,
-                              color: Colors.redAccent,
-                            ),
-                            constraints: const BoxConstraints(),
-                            padding: const EdgeInsets.only(left: 6),
-                            onPressed: () {
-                              setState(() {
-                                final removed =
-                                    _draftRecords.removeAt(i) as Map;
-                                (removed['amountCtrl'] as TextEditingController)
-                                    .dispose();
-                                (removed['focusNode'] as FocusNode).dispose();
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                      if (memo.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4, left: 2),
-                          child: Text(
-                            memo,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Colors.black54,
-                            ),
-                          ),
+                            const SizedBox(height: 6),
+                            memoField,
+                          ],
                         ),
-                    ],
-                  ),
                 );
               },
             ),
