@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -6,13 +7,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
 import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_screen.dart' show SnsScreen, PostImageCarousel;
 import 'sns_detail_screen.dart' show SnsDetailScreen;
 import 'sns_reply_screen.dart' show SnsReplyScreen;
 import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsSearchScreen extends StatefulWidget {
-  const SnsSearchScreen({super.key});
+  final String? initialHashtag;
+
+  const SnsSearchScreen({super.key, this.initialHashtag});
 
   @override
   State createState() => _SnsSearchScreenState();
@@ -26,9 +31,33 @@ class _SnsSearchScreenState extends State {
 
   String _searchQuery = '';
   String _selectedTag = 'すべて';
+  String _selectedHashtag = '';
+  bool _excludeAllergens = true;
 
   final List _tags = ['すべて', 'トレンド', '料理', '掃除', '収納', 'その他'];
   final Map _servingsPerPost = {};
+  final Map _postImageCache = {};
+  final Map _userIconCache = {};
+
+  late final Stream? _userPrefStream = currentUserId.isNotEmpty
+      ? FirebaseFirestore.instance
+            .collection('users')
+            .doc(currentUserId)
+            .snapshots()
+      : null;
+
+  late final Stream _postsStream = FirebaseFirestore.instance
+      .collection('posts')
+      .snapshots();
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = (widget as SnsSearchScreen).initialHashtag?.trim() ?? '';
+    if (initial.isNotEmpty) {
+      _selectedHashtag = initial.replaceFirst(RegExp(r'^[#＃]+'), '').trim();
+    }
+  }
 
   @override
   void dispose() {
@@ -36,13 +65,65 @@ class _SnsSearchScreenState extends State {
     super.dispose();
   }
 
-  Uint8List? _decodeBase64(String? base64String) {
-    if (base64String == null || base64String.isEmpty) return null;
+  Uint8List? _decodeAndCache(String cacheKey, String? rawBase64, Map cacheMap) {
+    if (rawBase64 == null || rawBase64.trim().isEmpty) return null;
+    final cleaned = rawBase64.contains(',')
+        ? rawBase64.split(',').last.replaceAll(RegExp(r'\s+'), '')
+        : rawBase64.replaceAll(RegExp(r'\s+'), '');
+    if (cleaned.isEmpty) return null;
+
+    final existing = cacheMap[cacheKey];
+    if (existing != null &&
+        existing is Map &&
+        existing['srcLen'] == cleaned.length &&
+        existing['bytes'] is Uint8List) {
+      return existing['bytes'] as Uint8List;
+    }
+
     try {
-      return base64Decode(base64String);
+      final decoded = base64Decode(cleaned);
+      if (decoded.isEmpty) return null;
+      cacheMap[cacheKey] = {'srcLen': cleaned.length, 'bytes': decoded};
+      return decoded;
     } catch (e) {
       return null;
     }
+  }
+
+  List _extractPostImages(String docId, Map post) {
+    final List result = [];
+    if (post['imagesBase64'] != null && post['imagesBase64'] is List) {
+      final rawList = List.from(post['imagesBase64']);
+      for (int i = 0; i < rawList.length; i++) {
+        final bytes = _decodeAndCache(
+          '${docId}_$i',
+          rawList[i]?.toString(),
+          _postImageCache,
+        );
+        if (bytes != null) {
+          result.add(bytes);
+        }
+      }
+    }
+    if (result.isEmpty && post['imageBase64'] != null) {
+      final bytes = _decodeAndCache(
+        '${docId}_single',
+        post['imageBase64']?.toString(),
+        _postImageCache,
+      );
+      if (bytes != null) {
+        result.add(bytes);
+      }
+    }
+    return result;
+  }
+
+  int _readReactionCount(dynamic rawCount, List fallbackList) {
+    final parsed = AiKnowledgeService.readIntField(rawCount, -1);
+    if (rawCount != null && parsed >= 0) {
+      return max(parsed, fallbackList.length);
+    }
+    return fallbackList.length;
   }
 
   String _getTopicKey(dynamic post) {
@@ -93,11 +174,73 @@ class _SnsSearchScreenState extends State {
     return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
+  String _buildPostAllergyTarget(Map post) {
+    final title = (post['title'] ?? post['recipeTitle'] ?? '').toString();
+    final content = (post['content'] ?? '').toString();
+    final steps = (post['recipeSteps'] ?? '').toString();
+    final List ingList = post['recipeIngredients'] is List
+        ? List.from(post['recipeIngredients'])
+        : const [];
+    final ingText = ingList
+        .where((e) => e is Map)
+        .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}')
+        .join('\n');
+    return '$title\n$content\n$ingText\n$steps';
+  }
+
+  Widget _buildHighlightedContent(String content) {
+    final List<TextSpan> spans = [];
+    int lastEnd = 0;
+
+    for (final match in SnsScreen.hashtagRegex.allMatches(content)) {
+      if (match.start > lastEnd) {
+        spans.add(
+          TextSpan(
+            text: content.substring(lastEnd, match.start),
+            style: const TextStyle(
+              fontSize: 14,
+              height: 1.45,
+              color: Colors.black87,
+            ),
+          ),
+        );
+      }
+      spans.add(
+        TextSpan(
+          text: content.substring(match.start, match.end),
+          style: TextStyle(
+            fontSize: 14,
+            height: 1.45,
+            color: Colors.blue.shade700,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < content.length) {
+      spans.add(
+        TextSpan(
+          text: content.substring(lastEnd),
+          style: const TextStyle(
+            fontSize: 14,
+            height: 1.45,
+            color: Colors.black87,
+          ),
+        ),
+      );
+    }
+
+    return Text.rich(TextSpan(children: spans));
+  }
+
   Future _askAiSubstitution({
     required String recipeTitle,
     required List ingredients,
     required String steps,
     required List missingAppliances,
+    required List allergies,
     String? targetIngredient,
   }) async {
     final key = AiChatScreen.apiKey.trim();
@@ -123,20 +266,22 @@ class _SnsSearchScreenState extends State {
     );
 
     final ingSummary = ingredients
+        .where((e) => e is Map)
         .map((e) {
           final m = e as Map;
-          return '${m['name']}: ${m['amount']}';
+          return '${m['name'] ?? ''}: ${m['amount'] ?? ''}';
         })
         .join('、');
     final missingText = missingAppliances.isEmpty
         ? 'なし'
         : missingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(allergies);
 
     final String prompt = targetIngredient != null
         ? '料理「$recipeTitle」（材料: $ingSummary）を作る際、「$targetIngredient」が家にありません。\n'
-              '一人暮らしの家によくある身近な食材や調味料を使った「$targetIngredient」の代用案と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、一人暮らしの家によくある身近な食材や調味料を使った「$targetIngredient」の代用案と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
         : '料理「$recipeTitle」（材料: $ingSummary / 手順: $steps）について、\n'
-              '持っていない調理家電【$missingText】を一切使わずに作る方法、およびさらに安く簡単に作れる代替アレンジ案を200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】を一切使わずに作る方法、およびさらに安く簡単に作れる代替アレンジ案を200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
 
     String aiReply = '代用案を取得できませんでした。もう一度お試しください。';
 
@@ -147,10 +292,16 @@ class _SnsSearchScreenState extends State {
             .generateContent([Content.text(prompt)])
             .timeout(const Duration(seconds: 20));
         if (res.text != null && res.text!.trim().isNotEmpty) {
-          aiReply = res.text!.trim();
+          aiReply = res.text!.replaceAll('**', '').replaceAll('##', '').trim();
           break;
         }
       } catch (e) {}
+    }
+
+    if (allergies.isNotEmpty &&
+        AiChatScreen.containsAllergen(aiReply, allergies)) {
+      aiReply =
+          'アレルギー対象食材（${allergies.join('・')}）に関連する表現が含まれたため表示を控えました。AI相談画面で使える手持ち食材を指定して聞いてみてください。';
     }
 
     if (!mounted) return;
@@ -192,54 +343,56 @@ class _SnsSearchScreenState extends State {
     );
   }
 
-  void _openFullScreenImage(
-    BuildContext context,
-    Uint8List imageBytes,
-    String heroTag,
-  ) {
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black,
-        barrierDismissible: true,
-        pageBuilder: (pageContext, animation, secondaryAnimation) {
-          return FadeTransition(
-            opacity: animation,
-            child: Scaffold(
-              backgroundColor: Colors.black,
-              appBar: AppBar(
-                backgroundColor: Colors.black,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
-                  onPressed: () => Navigator.of(pageContext).pop(),
-                ),
-              ),
-              body: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(pageContext).pop(),
-                child: Center(
-                  child: InteractiveViewer(
-                    minScale: 0.5,
-                    maxScale: 4.0,
-                    child: Hero(
-                      tag: heroTag,
-                      child: Image.memory(
-                        imageBytes,
-                        fit: BoxFit.contain,
-                        width: double.infinity,
-                        height: double.infinity,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
+  Future _toggleReaction({
+    required String docId,
+    required String listField,
+    required String countField,
+    required List currentUsers,
+    required int likesCount,
+    required int helpfulsCount,
+    required int savesCount,
+    required int repliesCount,
+    required int impressionsCount,
+  }) async {
+    if (currentUserId.isEmpty) return;
+    final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
+    final isAdded = currentUsers.contains(currentUserId);
+
+    showReactionToast(context, listField, added: !isAdded);
+
+    int nextLikes = likesCount;
+    int nextHelpfuls = helpfulsCount;
+    int nextSaves = savesCount;
+
+    if (countField == 'likes') {
+      nextLikes = isAdded ? max(0, likesCount - 1) : likesCount + 1;
+    } else if (countField == 'helpfuls') {
+      nextHelpfuls = isAdded ? max(0, helpfulsCount - 1) : helpfulsCount + 1;
+    } else if (countField == 'saves') {
+      nextSaves = isAdded ? max(0, savesCount - 1) : savesCount + 1;
+    }
+
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: nextLikes,
+      helpfuls: nextHelpfuls,
+      saves: nextSaves,
+      replies: repliesCount,
+      impressions: impressionsCount,
     );
+
+    final int nextTargetCount = countField == 'likes'
+        ? nextLikes
+        : (countField == 'helpfuls' ? nextHelpfuls : nextSaves);
+
+    try {
+      await docRef.update({
+        listField: isAdded
+            ? FieldValue.arrayRemove([currentUserId])
+            : FieldValue.arrayUnion([currentUserId]),
+        countField: nextTargetCount,
+        'valueScore': nextScore,
+      });
+    } catch (e) {}
   }
 
   Future _deletePost(String docId) async {
@@ -473,42 +626,89 @@ class _SnsSearchScreenState extends State {
   }
 
   Widget _buildRecipeSection(
-    dynamic post,
+    Map post,
     String docId,
     List missingAppliances,
+    List allergies,
   ) {
-    final String recipeTitle =
-        post['recipeTitle']?.toString().isNotEmpty == true
-        ? post['recipeTitle'].toString()
+    final String titleCandidate =
+        (post['title']?.toString().trim().isNotEmpty == true)
+        ? post['title'].toString().trim()
+        : (post['recipeTitle']?.toString().trim() ?? '');
+    final String recipeTitle = titleCandidate.isNotEmpty
+        ? titleCandidate
         : '手作りレシピ';
-    final int baseServings = (post['baseServings'] is int)
-        ? (post['baseServings'] as int)
-        : (int.tryParse(post['baseServings']?.toString() ?? '1') ?? 1);
+
+    final int baseServings =
+        int.tryParse(
+          (post['recipeServings'] ?? post['baseServings'] ?? '1').toString(),
+        ) ??
+        1;
     final int currentServings =
         (_servingsPerPost[docId] as int?) ?? baseServings;
 
-    final int baseCost = (post['recipeCost'] is int)
-        ? (post['recipeCost'] as int)
-        : (int.tryParse(post['recipeCost']?.toString() ?? '0') ?? 0);
-    final int scaledCost = baseServings > 0
-        ? ((baseCost * currentServings) / baseServings).round()
-        : baseCost;
+    final String rawCostText = post['recipeCost'] is int
+        ? ((post['recipeCost'] as int) > 0 ? '約${post['recipeCost']}円' : '')
+        : (post['recipeCost']?.toString().trim() ?? '');
+    final String scaledCostText = rawCostText.isNotEmpty
+        ? _scaleAmountString(rawCostText, baseServings, currentServings)
+        : '';
 
     final String recipeTime = post['recipeTime']?.toString() ?? '';
-    final List ingredients = List.from(post['recipeIngredients'] ?? []);
+    final List ingredients = post['recipeIngredients'] is List
+        ? List.from(post['recipeIngredients'])
+        : const [];
     final String steps = post['recipeSteps']?.toString() ?? '';
+
+    final List matchedAllergens = allergies.isNotEmpty
+        ? AiChatScreen.findMatchedAllergens(
+            _buildPostAllergyTarget(post),
+            allergies,
+          )
+        : const [];
 
     return Container(
       margin: const EdgeInsets.only(top: 10.0),
       padding: const EdgeInsets.all(14.0),
       decoration: BoxDecoration(
-        color: Colors.orange.shade50.withValues(alpha: 0.5),
+        color: Colors.orange.shade50.withValues(alpha: 0.65),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: Colors.orange.shade200),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (matchedAllergens.isNotEmpty)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.red.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 15,
+                    color: Colors.red.shade700,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'アレルギー設定食材（${matchedAllergens.join('・')}）を含む可能性があります',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.red.shade800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Row(
             children: [
               const Icon(Icons.restaurant, color: Colors.deepOrange, size: 20),
@@ -517,7 +717,7 @@ class _SnsSearchScreenState extends State {
                 child: Text(
                   recipeTitle,
                   style: const TextStyle(
-                    fontSize: 17,
+                    fontSize: 16,
                     fontWeight: FontWeight.bold,
                     color: Colors.black87,
                   ),
@@ -529,6 +729,7 @@ class _SnsSearchScreenState extends State {
                   ingredients: ingredients,
                   steps: steps,
                   missingAppliances: missingAppliances,
+                  allergies: allergies,
                 ),
                 icon: const Icon(
                   Icons.auto_awesome,
@@ -574,7 +775,7 @@ class _SnsSearchScreenState extends State {
                     ),
                   ),
                 ),
-              if (baseCost > 0)
+              if (scaledCostText.isNotEmpty)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
@@ -585,7 +786,7 @@ class _SnsSearchScreenState extends State {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    '目安費用: 約$scaledCost円（$currentServings人分）',
+                    '$scaledCostText（$currentServings人分）',
                     style: const TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
@@ -596,15 +797,15 @@ class _SnsSearchScreenState extends State {
             ],
           ),
           if (ingredients.isNotEmpty) ...[
-            const Divider(height: 20),
+            const Divider(height: 18),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  '【材料】（$currentServings人分）',
+                  '材料（$currentServings人分）',
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: 14,
+                    fontSize: 13,
                   ),
                 ),
                 Container(
@@ -659,9 +860,9 @@ class _SnsSearchScreenState extends State {
             for (final item in ingredients)
               Builder(
                 builder: (_) {
-                  final mapItem = item as Map;
-                  final iName = mapItem['name']?.toString() ?? '';
-                  final iRawAmount = mapItem['amount']?.toString() ?? '';
+                  if (item is! Map) return const SizedBox.shrink();
+                  final iName = item['name']?.toString() ?? '';
+                  final iRawAmount = item['amount']?.toString() ?? '';
                   final iScaledAmount = _scaleAmountString(
                     iRawAmount,
                     baseServings,
@@ -669,33 +870,23 @@ class _SnsSearchScreenState extends State {
                   );
 
                   return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 3.0),
+                    padding: const EdgeInsets.symmetric(vertical: 2.0),
                     child: Row(
                       children: [
-                        const Icon(
-                          Icons.check_circle_outline,
-                          size: 15,
-                          color: Colors.teal,
-                        ),
-                        const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            '$iName ： $iScaledAmount',
+                            '・$iName : $iScaledAmount',
                             style: const TextStyle(fontSize: 13),
                           ),
                         ),
-                        TextButton.icon(
+                        TextButton(
                           onPressed: () => _askAiSubstitution(
                             recipeTitle: recipeTitle,
                             ingredients: ingredients,
                             steps: steps,
                             missingAppliances: missingAppliances,
+                            allergies: allergies,
                             targetIngredient: iName,
-                          ),
-                          icon: const Icon(Icons.swap_horiz, size: 14),
-                          label: const Text(
-                            '代用案',
-                            style: TextStyle(fontSize: 11),
                           ),
                           style: TextButton.styleFrom(
                             padding: const EdgeInsets.symmetric(
@@ -705,6 +896,10 @@ class _SnsSearchScreenState extends State {
                             minimumSize: Size.zero,
                             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
+                          child: const Text(
+                            'AI代用案',
+                            style: TextStyle(fontSize: 11),
+                          ),
                         ),
                       ],
                     ),
@@ -713,13 +908,13 @@ class _SnsSearchScreenState extends State {
               ),
           ],
           if (steps.isNotEmpty) ...[
-            const Divider(height: 20),
+            const SizedBox(height: 8),
             const Text(
-              '【作り方】',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+              '作り方',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
             ),
             const SizedBox(height: 4),
-            Text(steps, style: const TextStyle(fontSize: 13, height: 1.5)),
+            Text(steps, style: const TextStyle(fontSize: 13, height: 1.45)),
           ],
         ],
       ),
@@ -729,16 +924,12 @@ class _SnsSearchScreenState extends State {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder(
-      stream: currentUserId.isNotEmpty
-          ? FirebaseFirestore.instance
-                .collection('users')
-                .doc(currentUserId)
-                .snapshots()
-          : null,
+      stream: _userPrefStream,
       builder: (context, myUserSnapshot) {
         List blockedUsers = [];
         List lessInterestedTopics = [];
         List missingAppliances = [];
+        List allergies = [];
 
         if (myUserSnapshot.hasData && myUserSnapshot.data != null) {
           final myDoc = myUserSnapshot.data as DocumentSnapshot;
@@ -749,218 +940,503 @@ class _SnsSearchScreenState extends State {
               myData['lessInterestedTopics'] ?? [],
             );
             missingAppliances = List.from(myData['missingAppliances'] ?? []);
+            if (myData['allergies'] is List) {
+              allergies = List.from(myData['allergies'])
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toList();
+            }
           }
         }
 
         return Scaffold(
           appBar: AppBar(
-            title: const Text('検索'),
+            leading: Navigator.of(context).canPop()
+                ? IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => Navigator.of(context).pop(),
+                  )
+                : IconButton(
+                    icon: const Icon(Icons.menu),
+                    onPressed: () => Scaffold.of(context).openDrawer(),
+                  ),
+            title: const Text(
+              'さがす',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             elevation: 0,
-            backgroundColor: Colors.transparent,
+            backgroundColor: Colors.white,
           ),
-          body: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: TextField(
-                  controller: _searchController,
-                  onChanged: (value) {
-                    setState(() {
-                      _searchQuery = value.trim().toLowerCase();
-                    });
-                  },
-                  decoration: InputDecoration(
-                    hintText: '検索...',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _searchQuery.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear),
+          backgroundColor: Colors.grey.shade100,
+          body: StreamBuilder(
+            stream: _postsStream,
+            builder: (context, snapshot) {
+              final List rawDocs = (snapshot.hasData && snapshot.data != null)
+                  ? (snapshot.data as QuerySnapshot).docs
+                  : const [];
+
+              final List baseVisibleDocs = [];
+              for (final doc in rawDocs) {
+                final data = doc.data() as Map;
+                if (data['mainCategory'] == 'AI') continue;
+
+                final List hiddenUsers = List.from(data['hiddenUsers'] ?? []);
+                if (hiddenUsers.contains(currentUserId)) continue;
+
+                final List reportedUsers = List.from(
+                  data['reportedUsers'] ?? [],
+                );
+                if (reportedUsers.length >= 3 ||
+                    reportedUsers.contains(currentUserId)) {
+                  continue;
+                }
+
+                final String postUid = data['userId']?.toString() ?? '';
+                final String postName = data['userName']?.toString() ?? '';
+                if ((postUid.isNotEmpty && blockedUsers.contains(postUid)) ||
+                    (postName.isNotEmpty && blockedUsers.contains(postName))) {
+                  continue;
+                }
+
+                if (_excludeAllergens &&
+                    allergies.isNotEmpty &&
+                    data['isRecipePost'] == true) {
+                  if (AiChatScreen.containsAllergen(
+                    _buildPostAllergyTarget(data),
+                    allergies,
+                  )) {
+                    continue;
+                  }
+                }
+
+                baseVisibleDocs.add(doc);
+              }
+
+              final List categoryFilteredDocs = baseVisibleDocs.where((doc) {
+                final data = (doc as QueryDocumentSnapshot).data() as Map;
+                if (_selectedTag == 'すべて' || _selectedTag == 'トレンド') {
+                  return true;
+                }
+                final mainCategory = (data['mainCategory'] ?? '').toString();
+                final subCategory = (data['subCategory'] ?? '').toString();
+                return mainCategory == _selectedTag ||
+                    subCategory == _selectedTag;
+              }).toList();
+
+              final Map hashtagCounts = {};
+              for (final doc in categoryFilteredDocs) {
+                final data = (doc as QueryDocumentSnapshot).data() as Map;
+                final tags = SnsScreen.extractHashtagsFromPost(data);
+                for (final rawT in tags) {
+                  final t = rawT.toString();
+                  hashtagCounts[t] = ((hashtagCounts[t] as int?) ?? 0) + 1;
+                }
+              }
+
+              final List sortedHashtags = hashtagCounts.entries.toList()
+                ..sort((a, b) => (b.value as int).compareTo(a.value as int));
+              final List topHashtags = sortedHashtags
+                  .take(15)
+                  .map(
+                    (e) => {'tag': e.key.toString(), 'count': e.value as int},
+                  )
+                  .toList();
+
+              if (_selectedHashtag.isNotEmpty &&
+                  !topHashtags.any(
+                    (e) => (e as Map)['tag'] == _selectedHashtag,
+                  )) {
+                topHashtags.insert(0, {
+                  'tag': _selectedHashtag,
+                  'count': (hashtagCounts[_selectedHashtag] as int?) ?? 0,
+                });
+              }
+
+              final String cleanedQuery = _searchQuery
+                  .replaceFirst(RegExp(r'^[#＃]+'), '')
+                  .trim();
+
+              final List filteredDocs = categoryFilteredDocs.where((doc) {
+                final data = (doc as QueryDocumentSnapshot).data() as Map;
+                final List postHashtags = SnsScreen.extractHashtagsFromPost(
+                  data,
+                );
+
+                if (_selectedHashtag.isNotEmpty &&
+                    !postHashtags.contains(_selectedHashtag)) {
+                  return false;
+                }
+
+                if (cleanedQuery.isEmpty) return true;
+
+                final title = (data['title'] ?? data['recipeTitle'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final content = (data['content'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final userName = (data['userName'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final steps = (data['recipeSteps'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final mainCat = (data['mainCategory'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final subCat = (data['subCategory'] ?? '')
+                    .toString()
+                    .toLowerCase();
+                final aiTagsText = data['aiTags'] is List
+                    ? List.from(data['aiTags']).join(' ').toLowerCase()
+                    : '';
+                final hashtagsText = postHashtags.join(' ').toLowerCase();
+                final ingText = data['recipeIngredients'] is List
+                    ? List.from(data['recipeIngredients'])
+                          .where((e) => e is Map)
+                          .map((e) => ((e as Map)['name'] ?? '').toString())
+                          .join(' ')
+                          .toLowerCase()
+                    : '';
+
+                return title.contains(cleanedQuery) ||
+                    content.contains(cleanedQuery) ||
+                    userName.contains(cleanedQuery) ||
+                    steps.contains(cleanedQuery) ||
+                    mainCat.contains(cleanedQuery) ||
+                    subCat.contains(cleanedQuery) ||
+                    aiTagsText.contains(cleanedQuery) ||
+                    hashtagsText.contains(cleanedQuery) ||
+                    ingText.contains(cleanedQuery);
+              }).toList();
+
+              filteredDocs.sort((a, b) {
+                final aData = (a as QueryDocumentSnapshot).data() as Map;
+                final bData = (b as QueryDocumentSnapshot).data() as Map;
+
+                if (_selectedTag == 'トレンド') {
+                  final aScore = aData['valueScore'] is num
+                      ? (aData['valueScore'] as num).toDouble()
+                      : ((aData['likedUsers'] is List)
+                            ? (aData['likedUsers'] as List).length.toDouble()
+                            : 0.0);
+                  final bScore = bData['valueScore'] is num
+                      ? (bData['valueScore'] as num).toDouble()
+                      : ((bData['likedUsers'] is List)
+                            ? (bData['likedUsers'] as List).length.toDouble()
+                            : 0.0);
+                  if (aScore != bScore) {
+                    return bScore.compareTo(aScore);
+                  }
+                }
+
+                final aTime = aData['createdAt'] as Timestamp?;
+                final bTime = bData['createdAt'] as Timestamp?;
+                if (aTime == null && bTime == null) return 0;
+                if (aTime == null) return 1;
+                if (bTime == null) return -1;
+                return bTime.compareTo(aTime);
+              });
+
+              return Column(
+                children: [
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TextField(
+                          controller: _searchController,
+                          onChanged: (value) {
+                            setState(() {
+                              _searchQuery = value.trim().toLowerCase();
+                            });
+                          },
+                          decoration: InputDecoration(
+                            hintText: 'キーワード・食材・#ハッシュタグで検索...',
+                            prefixIcon: const Icon(Icons.search),
+                            suffixIcon: _searchQuery.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() {
+                                        _searchQuery = '';
+                                      });
+                                    },
+                                  )
+                                : null,
+                            filled: true,
+                            fillColor: Colors.grey.shade100,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(30),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              vertical: 0,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 36,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: [
+                              for (final rawTag in _tags)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 6.0),
+                                  child: ChoiceChip(
+                                    label: Text(
+                                      rawTag.toString(),
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    selected: _selectedTag == rawTag.toString(),
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    selectedColor: Colors.blue,
+                                    backgroundColor: Colors.grey.shade100,
+                                    labelStyle: TextStyle(
+                                      color: _selectedTag == rawTag.toString()
+                                          ? Colors.white
+                                          : Colors.black87,
+                                      fontWeight:
+                                          _selectedTag == rawTag.toString()
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                    ),
+                                    side: BorderSide.none,
+                                    onSelected: (_) {
+                                      setState(() {
+                                        _selectedTag = rawTag.toString();
+                                      });
+                                    },
+                                  ),
+                                ),
+                              if (allergies.isNotEmpty)
+                                FilterChip(
+                                  avatar: Icon(
+                                    Icons.no_food_outlined,
+                                    size: 15,
+                                    color: _excludeAllergens
+                                        ? Colors.red.shade700
+                                        : Colors.grey,
+                                  ),
+                                  label: Text(
+                                    'アレルギー除外',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: _excludeAllergens
+                                          ? Colors.red.shade900
+                                          : Colors.black54,
+                                      fontWeight: _excludeAllergens
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                    ),
+                                  ),
+                                  selected: _excludeAllergens,
+                                  showCheckmark: false,
+                                  visualDensity: VisualDensity.compact,
+                                  selectedColor: Colors.red.shade50,
+                                  backgroundColor: Colors.grey.shade100,
+                                  side: BorderSide(
+                                    color: _excludeAllergens
+                                        ? Colors.red.shade200
+                                        : Colors.grey.shade300,
+                                  ),
+                                  onSelected: (val) {
+                                    setState(() {
+                                      _excludeAllergens = val;
+                                    });
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                        if (topHashtags.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                if (_selectedHashtag.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 6.0),
+                                    child: ActionChip(
+                                      visualDensity: VisualDensity.compact,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      avatar: const Icon(
+                                        Icons.close,
+                                        size: 14,
+                                        color: Colors.black54,
+                                      ),
+                                      label: const Text(
+                                        'タグ解除',
+                                        style: TextStyle(fontSize: 11),
+                                      ),
+                                      backgroundColor: Colors.grey.shade100,
+                                      onPressed: () {
+                                        setState(() => _selectedHashtag = '');
+                                      },
+                                    ),
+                                  ),
+                                for (final rawH in topHashtags)
+                                  Builder(
+                                    builder: (_) {
+                                      final h = rawH as Map;
+                                      final tag = h['tag'].toString();
+                                      final count = h['count'] as int;
+                                      final selected = _selectedHashtag == tag;
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 6.0,
+                                        ),
+                                        child: FilterChip(
+                                          label: Text('#$tag ($count)'),
+                                          selected: selected,
+                                          showCheckmark: false,
+                                          visualDensity: VisualDensity.compact,
+                                          materialTapTargetSize:
+                                              MaterialTapTargetSize.shrinkWrap,
+                                          selectedColor: Colors.indigo.shade50,
+                                          backgroundColor: Colors.grey.shade50,
+                                          side: BorderSide(
+                                            color: selected
+                                                ? Colors.indigo
+                                                : Colors.grey.shade300,
+                                          ),
+                                          labelStyle: TextStyle(
+                                            fontSize: 12,
+                                            color: selected
+                                                ? Colors.indigo.shade800
+                                                : Colors.blue.shade800,
+                                            fontWeight: selected
+                                                ? FontWeight.bold
+                                                : FontWeight.w500,
+                                          ),
+                                          shape: const StadiumBorder(),
+                                          onSelected: (_) {
+                                            setState(() {
+                                              _selectedHashtag = selected
+                                                  ? ''
+                                                  : tag;
+                                            });
+                                          },
+                                        ),
+                                      );
+                                    },
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  Divider(height: 1, color: Colors.grey.shade200),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _selectedHashtag.isNotEmpty
+                                ? '#$_selectedHashtag の投稿（${filteredDocs.length}件）'
+                                : (_selectedTag == 'トレンド'
+                                      ? 'トレンドの投稿（${filteredDocs.length}件）'
+                                      : '検索結果（${filteredDocs.length}件）'),
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        if (_selectedHashtag.isNotEmpty ||
+                            _searchQuery.isNotEmpty ||
+                            _selectedTag != 'すべて')
+                          TextButton(
                             onPressed: () {
                               _searchController.clear();
                               setState(() {
                                 _searchQuery = '';
+                                _selectedTag = 'すべて';
+                                _selectedHashtag = '';
                               });
                             },
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: const Text(
+                              '条件リセット',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: snapshot.connectionState == ConnectionState.waiting
+                        ? const Center(child: CircularProgressIndicator())
+                        : filteredDocs.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.search_off,
+                                  size: 46,
+                                  color: Colors.grey.shade300,
+                                ),
+                                const SizedBox(height: 10),
+                                const Text(
+                                  '該当する投稿が見つかりませんでした',
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                              ],
+                            ),
                           )
-                        : null,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                        : Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 680),
+                              child: ListView.builder(
+                                padding: const EdgeInsets.only(bottom: 110),
+                                itemCount: filteredDocs.length,
+                                itemBuilder: (context, index) {
+                                  final doc =
+                                      filteredDocs[index]
+                                          as QueryDocumentSnapshot;
+                                  final data = doc.data() as Map;
+                                  final docId = doc.id;
+                                  final String topicKey = _getTopicKey(data);
+                                  final bool isTopicDemoted =
+                                      topicKey.isNotEmpty &&
+                                      lessInterestedTopics.contains(topicKey);
+
+                                  return _buildPostCard(
+                                    data,
+                                    docId,
+                                    context,
+                                    topicKey,
+                                    isTopicDemoted,
+                                    missingAppliances,
+                                    allergies,
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
                   ),
-                ),
-              ),
-              SizedBox(
-                height: 40,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: _tags.length,
-                  itemBuilder: (context, index) {
-                    final tag = _tags[index].toString();
-                    final isSelected = _selectedTag == tag;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8.0),
-                      child: ChoiceChip(
-                        label: Text(tag),
-                        selected: isSelected,
-                        selectedColor: Colors.blue.shade100,
-                        backgroundColor: Colors.grey.shade200,
-                        side: BorderSide.none,
-                        onSelected: (selected) {
-                          setState(() {
-                            _selectedTag = tag;
-                          });
-                        },
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 16),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    _selectedTag == 'トレンド' ? 'トレンドの投稿（いいね順）' : '検索結果・人気の投稿',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: StreamBuilder(
-                  stream: FirebaseFirestore.instance
-                      .collection('posts')
-                      .snapshots(),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-                    if (!snapshot.hasData || snapshot.data == null) {
-                      return const Center(child: Text('まだ投稿がありません。'));
-                    }
-
-                    final querySnap = snapshot.data as QuerySnapshot;
-                    final docs = querySnap.docs;
-                    if (docs.isEmpty) {
-                      return const Center(child: Text('まだ投稿がありません。'));
-                    }
-
-                    final List filteredDocs = docs.where((doc) {
-                      final data = doc.data() as Map;
-                      if (data['mainCategory'] == 'AI') return false;
-
-                      final List hiddenUsers = List.from(
-                        data['hiddenUsers'] ?? [],
-                      );
-                      if (hiddenUsers.contains(currentUserId)) return false;
-
-                      final List reportedUsers = List.from(
-                        data['reportedUsers'] ?? [],
-                      );
-                      if (reportedUsers.length >= 3) return false;
-
-                      final String postUid = data['userId']?.toString() ?? '';
-                      final String postName =
-                          data['userName']?.toString() ?? '';
-                      final String userKey = postUid.isNotEmpty
-                          ? postUid
-                          : postName;
-                      if (userKey.isNotEmpty &&
-                          blockedUsers.contains(userKey)) {
-                        return false;
-                      }
-
-                      final content = (data['content'] ?? '')
-                          .toString()
-                          .toLowerCase();
-                      final userName = (data['userName'] ?? '')
-                          .toString()
-                          .toLowerCase();
-                      final mainCategory = (data['mainCategory'] ?? '')
-                          .toString();
-                      final subCategory = (data['subCategory'] ?? '')
-                          .toString();
-
-                      final matchesQuery =
-                          _searchQuery.isEmpty ||
-                          content.contains(_searchQuery) ||
-                          userName.contains(_searchQuery);
-
-                      bool matchesTag = true;
-                      if (_selectedTag == 'すべて' || _selectedTag == 'トレンド') {
-                        matchesTag = true;
-                      } else {
-                        matchesTag =
-                            mainCategory == _selectedTag ||
-                            subCategory == _selectedTag;
-                      }
-
-                      return matchesQuery && matchesTag;
-                    }).toList();
-
-                    filteredDocs.sort((a, b) {
-                      final aData = (a as QueryDocumentSnapshot).data() as Map;
-                      final bData = (b as QueryDocumentSnapshot).data() as Map;
-
-                      if (_selectedTag == 'トレンド') {
-                        final aLikes = (aData['likedUsers'] is List)
-                            ? (aData['likedUsers'] as List).length
-                            : 0;
-                        final bLikes = (bData['likedUsers'] is List)
-                            ? (bData['likedUsers'] as List).length
-                            : 0;
-                        if (aLikes != bLikes) {
-                          return bLikes.compareTo(aLikes);
-                        }
-                      }
-
-                      final aTime = aData['createdAt'] as Timestamp?;
-                      final bTime = bData['createdAt'] as Timestamp?;
-                      if (aTime == null || bTime == null) return 0;
-                      return bTime.compareTo(aTime);
-                    });
-
-                    if (filteredDocs.isEmpty) {
-                      return const Center(
-                        child: Text(
-                          '該当する投稿が見つかりませんでした',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      );
-                    }
-
-                    return ListView.builder(
-                      itemCount: filteredDocs.length,
-                      itemBuilder: (context, index) {
-                        final doc =
-                            filteredDocs[index] as QueryDocumentSnapshot;
-                        final data = doc.data() as Map;
-                        final docId = doc.id;
-                        final String topicKey = _getTopicKey(data);
-                        final bool isTopicDemoted =
-                            topicKey.isNotEmpty &&
-                            lessInterestedTopics.contains(topicKey);
-
-                        return _buildPostCard(
-                          data,
-                          docId,
-                          context,
-                          topicKey,
-                          isTopicDemoted,
-                          missingAppliances,
-                        );
-                      },
-                    );
-                  },
-                ),
-              ),
-            ],
+                ],
+              );
+            },
           ),
         );
       },
@@ -968,18 +1444,16 @@ class _SnsSearchScreenState extends State {
   }
 
   Widget _buildPostCard(
-    dynamic post,
+    Map post,
     String docId,
     BuildContext context,
     String topicKey,
     bool isTopicDemoted,
     List missingAppliances,
+    List allergies,
   ) {
-    final bool hasImage = post['hasImage'] == true;
     final bool isRecipePost = post['isRecipePost'] == true;
-    final int replies = post['replies'] is num
-        ? (post['replies'] as num).toInt()
-        : (int.tryParse(post['replies']?.toString() ?? '0') ?? 0);
+    final int replies = _readReactionCount(post['replies'], const []);
 
     final List likedUsers = post['likedUsers'] != null
         ? List.from(post['likedUsers'])
@@ -995,8 +1469,15 @@ class _SnsSearchScreenState extends State {
     final bool isHelpful = helpfulUsers.contains(currentUserId);
     final bool isSaved = savedUsers.contains(currentUserId);
 
-    final int likesCount = likedUsers.length;
-    final int helpfulsCount = helpfulUsers.length;
+    final int likesCount = _readReactionCount(post['likes'], likedUsers);
+    final int helpfulsCount = _readReactionCount(
+      post['helpfuls'],
+      helpfulUsers,
+    );
+    final int savesCount = _readReactionCount(post['saves'], savedUsers);
+    final int impressionsCount = AiKnowledgeService.readIntField(
+      post['impressions'],
+    );
 
     final String postUserId = post['userId']?.toString() ?? '';
     final String rawUserName = post['userName']?.toString() ?? '名無し';
@@ -1011,10 +1492,8 @@ class _SnsSearchScreenState extends State {
         ? postUserId
         : rawUserName;
 
-    final Uint8List? postImageBytes = _decodeBase64(
-      post['imageBase64']?.toString(),
-    );
-    final String heroTag = 'search_img_$docId';
+    final List postImages = _extractPostImages(docId, post);
+    final List postHashtags = SnsScreen.extractHashtagsFromPost(post);
 
     return StreamBuilder(
       stream: targetLookupUid.isNotEmpty
@@ -1042,7 +1521,11 @@ class _SnsSearchScreenState extends State {
           }
         }
 
-        final Uint8List? userIconBytes = _decodeBase64(displayIconBase64);
+        final Uint8List? userIconBytes = _decodeAndCache(
+          targetUserKey,
+          displayIconBase64,
+          _userIconCache,
+        );
 
         return InkWell(
           onTap: () {
@@ -1054,9 +1537,12 @@ class _SnsSearchScreenState extends State {
             );
           },
           child: Container(
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
+              color: Colors.white,
               border: Border(
-                bottom: BorderSide(color: Colors.grey, width: 0.5),
+                bottom: BorderSide(color: Colors.grey.shade200, width: 1),
+                left: BorderSide(color: Colors.grey.shade200, width: 0.5),
+                right: BorderSide(color: Colors.grey.shade200, width: 0.5),
               ),
             ),
             padding: const EdgeInsets.all(16.0),
@@ -1064,85 +1550,69 @@ class _SnsSearchScreenState extends State {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     CircleAvatar(
-                      backgroundColor: Colors.grey,
+                      radius: 20,
+                      backgroundColor: Colors.blue.shade100,
                       backgroundImage: userIconBytes != null
                           ? MemoryImage(userIconBytes)
                           : null,
                       child: userIconBytes == null
-                          ? const Icon(Icons.person, color: Colors.white)
+                          ? const Icon(Icons.person, color: Colors.blue)
                           : null,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Wrap(
                         crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8.0,
+                        spacing: 6.0,
                         runSpacing: 4.0,
                         children: [
                           Text(
                             displayUserName,
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 16,
+                              fontSize: 15,
                             ),
                           ),
                           if (post['mainCategory'] != null &&
                               post['mainCategory'] != '指定なし')
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
+                                horizontal: 8,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
                                 color: Colors.blue.shade50,
-                                borderRadius: BorderRadius.circular(4),
+                                borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
                                 post['mainCategory'].toString(),
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: Colors.blue.shade700,
+                                  color: Colors.blue.shade800,
+                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
                           if (post['subCategory'] != null &&
-                              post['subCategory'] != '指定なし')
+                              post['subCategory'] != '指定なし' &&
+                              post['subCategory'].toString().isNotEmpty)
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
+                                horizontal: 8,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(4),
+                                color: Colors.grey.shade100,
+                                borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
                                 post['subCategory'].toString(),
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 11,
-                                  color: Colors.green.shade700,
-                                ),
-                              ),
-                            ),
-                          if (isRecipePost)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade100,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                'レシピ',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.orange.shade900,
+                                  color: Colors.black54,
                                 ),
                               ),
                             ),
@@ -1154,7 +1624,7 @@ class _SnsSearchScreenState extends State {
                               ),
                               decoration: BoxDecoration(
                                 color: Colors.grey.shade200,
-                                borderRadius: BorderRadius.circular(4),
+                                borderRadius: BorderRadius.circular(8),
                               ),
                               child: const Text(
                                 '表示頻度低',
@@ -1186,41 +1656,89 @@ class _SnsSearchScreenState extends State {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                if ((post['content']?.toString() ?? '').isNotEmpty)
-                  Text(
-                    post['content'].toString(),
-                    style: const TextStyle(fontSize: 15),
-                  ),
-                if (isRecipePost)
-                  _buildRecipeSection(post, docId, missingAppliances),
-                if (hasImage && postImageBytes != null) ...[
-                  const SizedBox(height: 12),
-                  GestureDetector(
-                    onTap: () =>
-                        _openFullScreenImage(context, postImageBytes, heroTag),
-                    child: Hero(
-                      tag: heroTag,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 300),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.memory(
-                            postImageBytes,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
+                if (!isRecipePost &&
+                    (post['title']?.toString().trim().isNotEmpty == true))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10.0, bottom: 2.0),
+                    child: Text(
+                      post['title'].toString(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
                       ),
                     ),
                   ),
-                ],
+                if ((post['content']?.toString().trim() ?? '').isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: _buildHighlightedContent(post['content'].toString()),
+                  ),
+                if (postHashtags.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final rawTag in postHashtags)
+                          InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () {
+                              setState(() {
+                                _selectedHashtag = rawTag.toString();
+                              });
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _selectedHashtag == rawTag.toString()
+                                    ? Colors.indigo.shade100
+                                    : Colors.indigo.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: _selectedHashtag == rawTag.toString()
+                                      ? Colors.indigo
+                                      : Colors.indigo.shade100,
+                                ),
+                              ),
+                              child: Text(
+                                '#${rawTag.toString()}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.indigo.shade700,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                if (isRecipePost)
+                  _buildRecipeSection(
+                    post,
+                    docId,
+                    missingAppliances,
+                    allergies,
+                  ),
+                if (postImages.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10.0),
+                    child: PostImageCarousel(
+                      imagesList: postImages,
+                      keyPrefix: 'search_$docId',
+                    ),
+                  ),
                 const SizedBox(height: 12),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     _buildActionButton(
                       icon: Icons.chat_bubble_outline,
-                      color: Colors.black54,
+                      color: Colors.grey,
                       count: replies,
                       onTap: () {
                         Navigator.push(
@@ -1236,91 +1754,53 @@ class _SnsSearchScreenState extends State {
                     ),
                     _buildActionButton(
                       icon: isLiked ? Icons.favorite : Icons.favorite_border,
-                      color: isLiked ? Colors.pink : Colors.black54,
+                      color: isLiked ? Colors.pink : Colors.grey,
                       count: likesCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'likedUsers',
-                          added: !isLiked,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isLiked) {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'likedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                      onTap: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'likedUsers',
+                        countField: 'likes',
+                        currentUsers: likedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
+                      ),
                     ),
                     _buildActionButton(
-                      icon: isHelpful ? Icons.thumb_up : Icons.thumb_up_off_alt,
-                      color: isHelpful ? Colors.blue : Colors.black54,
+                      icon: isHelpful
+                          ? Icons.lightbulb
+                          : Icons.lightbulb_outline,
+                      color: isHelpful ? Colors.orange : Colors.grey,
                       count: helpfulsCount,
-                      onTap: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'helpfulUsers',
-                          added: !isHelpful,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isHelpful) {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'helpfulUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
-                    ),
-                    IconButton(
-                      icon: Icon(
-                        isSaved ? Icons.bookmark : Icons.bookmark_border,
-                        color: isSaved ? Colors.blue : Colors.black54,
+                      onTap: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'helpfulUsers',
+                        countField: 'helpfuls',
+                        currentUsers: helpfulUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
                       ),
-                      onPressed: () {
-                        if (currentUserId.isEmpty) return;
-                        showReactionToast(
-                          context,
-                          'savedUsers',
-                          added: !isSaved,
-                        );
-                        final docRef = FirebaseFirestore.instance
-                            .collection('posts')
-                            .doc(docId);
-                        if (isSaved) {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayRemove([
-                              currentUserId,
-                            ]),
-                          });
-                        } else {
-                          docRef.update({
-                            'savedUsers': FieldValue.arrayUnion([
-                              currentUserId,
-                            ]),
-                          });
-                        }
-                      },
+                    ),
+                    _buildActionButton(
+                      icon: isSaved ? Icons.bookmark : Icons.bookmark_border,
+                      color: isSaved ? Colors.blue : Colors.grey,
+                      count: savesCount,
+                      onTap: () => _toggleReaction(
+                        docId: docId,
+                        listField: 'savedUsers',
+                        countField: 'saves',
+                        currentUsers: savedUsers,
+                        likesCount: likesCount,
+                        helpfulsCount: helpfulsCount,
+                        savesCount: savesCount,
+                        repliesCount: replies,
+                        impressionsCount: impressionsCount,
+                      ),
                     ),
                   ],
                 ),
@@ -1342,15 +1822,21 @@ class _SnsSearchScreenState extends State {
       onTap: onTap,
       borderRadius: BorderRadius.circular(20),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+        padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
         child: Row(
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(width: 4),
-            Text(
-              count != 0 ? count.toString() : '',
-              style: TextStyle(color: color, fontWeight: FontWeight.bold),
-            ),
+            Icon(icon, color: color, size: 21),
+            if (count > 0) ...[
+              const SizedBox(width: 4),
+              Text(
+                count.toString(),
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ],
           ],
         ),
       ),
