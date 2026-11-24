@@ -8,12 +8,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import '../services/ai_knowledge_service.dart';
-import 'ai_chat_screen.dart';
-import 'sns_reply_screen.dart';
-import 'sns_detail_screen.dart';
-import 'sns_add_screen.dart';
-import '../widgets/top_toast.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_reply_screen.dart' show SnsReplyScreen;
+import 'sns_detail_screen.dart' show SnsDetailScreen;
+import 'sns_add_screen.dart' show openPostScreen;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsScreen extends StatefulWidget {
   const SnsScreen({super.key});
@@ -40,21 +40,16 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   final Map _userIconCache = {};
   final Set _viewedPostIds = Set();
 
-  // ---- 「フォロー中」タブ用 ----
-  // TODO(フォロー機能担当の人へ): users ドキュメントでフォロー中のユーザーIDを
-  // 入れるフィールド名が決まったら、ここだけ書き換えてください。
-  // 中身は「フォローしている人の uid の配列」を想定しています。
   static const String _followingField = 'following';
 
-  // ---- 「タグ別」タブ用 ----
   static const String _all = 'すべて';
-  static const Map<String, List<String>> _tagCategories = {
+  static const Map _tagCategories = {
     '料理': ['野菜', '肉類', '麺類', '作り置き', 'その他'],
     '掃除': ['キッチン', 'お風呂', 'トイレ', 'リビング', 'その他'],
     '収納': ['クローゼット', 'デスク周り', '小物', 'その他'],
     'その他': [],
   };
-  static const Map<String, IconData> _tagIcons = {
+  static const Map _tagIcons = {
     _all: Icons.apps,
     '料理': Icons.restaurant,
     '掃除': Icons.cleaning_services_outlined,
@@ -64,14 +59,13 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   String _tagMain = _all;
   String _tagSub = _all;
 
-  // タグを切り替えるたびに通信し直さないよう、ストリームは1回だけ作る
-  late final Stream<DocumentSnapshot>? _userPrefStream = currentUserId.isNotEmpty
+  late final Stream? _userPrefStream = currentUserId.isNotEmpty
       ? FirebaseFirestore.instance
             .collection('users')
             .doc(currentUserId)
             .snapshots()
       : null;
-  late final Stream<QuerySnapshot> _postsStream = FirebaseFirestore.instance
+  late final Stream _postsStream = FirebaseFirestore.instance
       .collection('posts')
       .orderBy('createdAt', descending: true)
       .snapshots();
@@ -454,7 +448,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     final docRef = FirebaseFirestore.instance.collection('posts').doc(docId);
     final isAdded = currentUsers.contains(currentUserId);
 
-    // 押した瞬間に上から通知を出す（X風）
     showReactionToast(context, listField, added: !isAdded);
 
     int nextLikes = likesCount;
@@ -1050,7 +1043,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
-      // X風：右下に浮かぶ投稿ボタン
       floatingActionButton: FloatingActionButton(
         heroTag: 'postBtn',
         onPressed: () => openPostScreen(context),
@@ -1246,7 +1238,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
           ),
           if (_showScrollToTop)
             Positioned(
-              right: 24, // 投稿ボタンの真上にそろえる
+              right: 24,
               bottom: 88,
               child: FloatingActionButton.small(
                 heroTag: 'scrollToTopBtn',
@@ -1262,8 +1254,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     );
   }
 
-  // ===================== フォロー中タブ =====================
-
   Widget _buildFollowingFeed({
     required List docs,
     required List followingUsers,
@@ -1271,7 +1261,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     required List lessInterestedTopics,
     required List missingAppliances,
   }) {
-    // まだ誰もフォローしていない（フォロー機能ができる前もここに来る）
     if (followingUsers.isEmpty) {
       return _buildFollowingEmpty(
         icon: Icons.person_add_alt_1_outlined,
@@ -1353,8 +1342,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     );
   }
 
-  // ===================== タグ別タブ =====================
-
   bool _matchesTag(Map post, String main, String sub) {
     if (main == _all) return true;
     final postMain = post['mainCategory']?.toString() ?? '';
@@ -1383,10 +1370,10 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       return _matchesTag(post, _tagMain, _tagSub);
     }).toList();
 
-    final mainList = [_all, ..._tagCategories.keys];
-    final subList = _tagMain == _all
-        ? <String>[]
-        : (_tagCategories[_tagMain] ?? <String>[]);
+    final List mainList = [_all, ..._tagCategories.keys];
+    final List subList = _tagMain == _all
+        ? []
+        : List.from(_tagCategories[_tagMain] ?? []);
 
     return Column(
       children: [
@@ -1397,19 +1384,19 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ---- 大カテゴリ ----
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Row(
-                  children: mainList.map((main) {
+                  children: mainList.map((rawMain) {
+                    final main = rawMain.toString();
                     final selected = _tagMain == main;
                     final count = _countTag(docs, main, _all);
                     return Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: ChoiceChip(
                         avatar: Icon(
-                          _tagIcons[main] ?? Icons.label_outline,
+                          (_tagIcons[main] as IconData?) ?? Icons.label_outline,
                           size: 18,
                           color: selected ? Colors.white : Colors.black54,
                         ),
@@ -1423,8 +1410,9 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         ),
                         labelStyle: TextStyle(
                           color: selected ? Colors.white : Colors.black87,
-                          fontWeight:
-                              selected ? FontWeight.bold : FontWeight.normal,
+                          fontWeight: selected
+                              ? FontWeight.bold
+                              : FontWeight.normal,
                         ),
                         shape: const StadiumBorder(),
                         onSelected: (_) {
@@ -1438,8 +1426,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   }).toList(),
                 ),
               ),
-
-              // ---- 小カテゴリ（大カテゴリを選んだときだけ出る） ----
               AnimatedSize(
                 duration: const Duration(milliseconds: 200),
                 curve: Curves.easeOut,
@@ -1451,7 +1437,8 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                           scrollDirection: Axis.horizontal,
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           child: Row(
-                            children: [_all, ...subList].map((sub) {
+                            children: [_all, ...subList].map((rawSub) {
+                              final sub = rawSub.toString();
                               final selected = _tagSub == sub;
                               final count = _countTag(docs, _tagMain, sub);
                               return Padding(
@@ -1499,7 +1486,8 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        _tagIcons[_tagMain] ?? Icons.label_outline,
+                        (_tagIcons[_tagMain] as IconData?) ??
+                            Icons.label_outline,
                         size: 48,
                         color: Colors.grey.shade300,
                       ),

@@ -1,12 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// 使い方:
-///   showTopToast(context, 'タイムラインに投稿しました');
-///   showTopToast(context, '投稿に失敗しました', isError: true);
-///   showReactionToast(context, 'likedUsers', added: true);
 OverlayEntry? _currentToast;
 
-/// いいね・参考になった・保存 を押したときの通知
 /// [listField] は Firestore のフィールド名（likedUsers / helpfulUsers / savedUsers）
 /// [added] は「押してONになった」なら true、「取り消した」なら false
 void showReactionToast(

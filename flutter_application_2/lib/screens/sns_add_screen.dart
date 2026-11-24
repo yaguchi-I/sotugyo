@@ -7,13 +7,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import 'ai_chat_screen.dart';
-import '../services/ai_knowledge_service.dart';
-import '../widgets/top_toast.dart';
+import 'ai_chat_screen.dart' show AiChatScreen;
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import '../widgets/top_toast.dart' show showTopToast;
 
-/// X風：下からせり上がる全画面で投稿画面を開く
-/// どの画面からでも openPostScreen(context); で呼べる
-Future<void> openPostScreen(BuildContext context) {
+Future openPostScreen(BuildContext context) {
   return Navigator.of(context).push(
     PageRouteBuilder(
       fullscreenDialog: true,
@@ -27,7 +25,7 @@ Future<void> openPostScreen(BuildContext context) {
           reverseCurve: Curves.easeInCubic,
         );
         return SlideTransition(
-          position: Tween<Offset>(
+          position: Tween(
             begin: const Offset(0, 1),
             end: Offset.zero,
           ).animate(curved),
@@ -403,7 +401,6 @@ class _SnsAddScreenState extends State {
         _isUploading = false;
       });
 
-      // X風に画面の上から「投稿しました」を出して、タイムラインに戻る
       showTopToast(context, 'タイムラインに投稿しました');
 
       if (_onPostSuccess != null) {
@@ -419,21 +416,19 @@ class _SnsAddScreenState extends State {
     }
   }
 
-  /// 何か入力済みか（閉じるときに確認するため）
   bool get _hasDraft =>
       _contentController.text.trim().isNotEmpty ||
       _recipeTitleController.text.trim().isNotEmpty ||
       _recipeStepsController.text.trim().isNotEmpty ||
       _imageBytesList.isNotEmpty;
 
-  /// ×ボタン・戻る操作で閉じるとき
-  Future<void> _closeScreen() async {
+  Future _closeScreen() async {
     if (_isUploading) return;
     if (!_hasDraft) {
       Navigator.of(context).pop();
       return;
     }
-    final discard = await showDialog<bool>(
+    final discard = await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('投稿を破棄しますか？'),
@@ -465,392 +460,394 @@ class _SnsAddScreenState extends State {
         if (!didPop) _closeScreen();
       },
       child: Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          tooltip: '閉じる',
-          onPressed: _closeScreen,
-        ),
-        title: const Text(
-          '新規投稿',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 12.0),
-            child: ElevatedButton.icon(
-              onPressed: _isUploading ? null : _submitPost,
-              icon: _isUploading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Icon(Icons.send, size: 16),
-              label: const Text('投稿する'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
-              ),
-            ),
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: '閉じる',
+            onPressed: _closeScreen,
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text(
-                '🍳 料理レシピとして投稿する（分量・金額計算対応）',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+          title: const Text(
+            '新規投稿',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 12.0),
+              child: ElevatedButton.icon(
+                onPressed: _isUploading ? null : _submitPost,
+                icon: _isUploading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send, size: 16),
+                label: const Text('投稿する'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
               ),
-              subtitle: const Text(
-                'ONにすると材料や人数・金額を入力でき、他の人が人数変更やAI代用案を使えるようになります',
-                style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text(
+                  '🍳 料理レシピとして投稿する（分量・金額計算対応）',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                subtitle: const Text(
+                  'ONにすると材料や人数・金額を入力でき、他の人が人数変更やAI代用案を使えるようになります',
+                  style: TextStyle(fontSize: 12),
+                ),
+                value: _isRecipeMode,
+                onChanged: (val) {
+                  setState(() {
+                    _isRecipeMode = val;
+                    if (val) {
+                      _selectedMainCategory = '料理';
+                      _selectedSubCategory = '野菜';
+                    }
+                  });
+                },
               ),
-              value: _isRecipeMode,
-              onChanged: (val) {
-                setState(() {
-                  _isRecipeMode = val;
-                  if (val) {
-                    _selectedMainCategory = '料理';
-                    _selectedSubCategory = '野菜';
-                  }
-                });
-              },
-            ),
-            const Divider(),
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField(
-                    value: _selectedMainCategory,
-                    decoration: const InputDecoration(
-                      labelText: 'メインカテゴリ',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                    ),
-                    items: _mainCategories.map((c) {
-                      final str = c.toString();
-                      return DropdownMenuItem(value: str, child: Text(str));
-                    }).toList(),
-                    onChanged: _isRecipeMode
-                        ? null
-                        : (val) {
-                            if (val != null) {
-                              final nextMain = val.toString();
-                              final nextSubs = List.from(
-                                _subCategories[nextMain] ?? ['指定なし'],
-                              );
-                              setState(() {
-                                _selectedMainCategory = nextMain;
-                                _selectedSubCategory = nextSubs.first
-                                    .toString();
-                              });
-                            }
-                          },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField(
-                    value: currentSubList.contains(_selectedSubCategory)
-                        ? _selectedSubCategory
-                        : currentSubList.first.toString(),
-                    decoration: const InputDecoration(
-                      labelText: 'サブカテゴリ',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                    ),
-                    items: currentSubList.map((s) {
-                      final str = s.toString();
-                      return DropdownMenuItem(value: str, child: Text(str));
-                    }).toList(),
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() {
-                          _selectedSubCategory = val.toString();
-                        });
-                      }
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            if (_isRecipeMode) ...[
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.orange.shade200),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: _recipeTitleController,
+              const Divider(),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField(
+                      value: _selectedMainCategory,
                       decoration: const InputDecoration(
-                        labelText: '料理名（必須）',
-                        hintText: '例：豚バラとキャベツの旨塩炒め',
-                        filled: true,
-                        fillColor: Colors.white,
+                        labelText: 'メインカテゴリ',
                         border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                       ),
+                      items: _mainCategories.map((c) {
+                        final str = c.toString();
+                        return DropdownMenuItem(value: str, child: Text(str));
+                      }).toList(),
+                      onChanged: _isRecipeMode
+                          ? null
+                          : (val) {
+                              if (val != null) {
+                                final nextMain = val.toString();
+                                final nextSubs = List.from(
+                                  _subCategories[nextMain] ?? ['指定なし'],
+                                );
+                                setState(() {
+                                  _selectedMainCategory = nextMain;
+                                  _selectedSubCategory = nextSubs.first
+                                      .toString();
+                                });
+                              }
+                            },
                     ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _recipeCostController,
-                            decoration: const InputDecoration(
-                              labelText: '目安費用',
-                              hintText: '例：約180円',
-                              filled: true,
-                              fillColor: Colors.white,
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: TextField(
-                            controller: _recipeTimeController,
-                            decoration: const InputDecoration(
-                              labelText: '調理時間',
-                              hintText: '例：約10分',
-                              filled: true,
-                              fillColor: Colors.white,
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          '基準の人数（何人分の分量か）',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.remove_circle_outline),
-                              onPressed: _baseServings > 1
-                                  ? () {
-                                      setState(() {
-                                        _baseServings--;
-                                      });
-                                    }
-                                  : null,
-                            ),
-                            Text(
-                              '$_baseServings人分',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15,
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.add_circle_outline),
-                              onPressed: _baseServings < 6
-                                  ? () {
-                                      setState(() {
-                                        _baseServings++;
-                                      });
-                                    }
-                                  : null,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const Divider(),
-                    const Text(
-                      '材料リスト（数値を入れると自動で人数計算されます）',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ...List.generate(_ingredientRows.length, (idx) {
-                      final mapRow = _ingredientRows[idx] as Map;
-                      final nameCtrl = mapRow['name'] as TextEditingController;
-                      final amountCtrl =
-                          mapRow['amount'] as TextEditingController;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              flex: 3,
-                              child: TextField(
-                                controller: nameCtrl,
-                                decoration: const InputDecoration(
-                                  hintText: '材料名（例：豚肉）',
-                                  filled: true,
-                                  fillColor: Colors.white,
-                                  isDense: true,
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              flex: 2,
-                              child: TextField(
-                                controller: amountCtrl,
-                                decoration: const InputDecoration(
-                                  hintText: '分量（例：100g）',
-                                  filled: true,
-                                  fillColor: Colors.white,
-                                  isDense: true,
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(
-                                Icons.remove_circle,
-                                color: Colors.redAccent,
-                              ),
-                              onPressed: () => _removeIngredientRow(idx),
-                            ),
-                          ],
-                        ),
-                      );
-                    }),
-                    TextButton.icon(
-                      onPressed: _addIngredientRow,
-                      icon: const Icon(Icons.add),
-                      label: const Text('材料を追加する'),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _recipeStepsController,
-                      maxLines: 4,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: DropdownButtonFormField(
+                      value: currentSubList.contains(_selectedSubCategory)
+                          ? _selectedSubCategory
+                          : currentSubList.first.toString(),
                       decoration: const InputDecoration(
-                        labelText: '作り方・手順',
-                        hintText: '1. 野菜を切る\n2. フライパンで炒める...',
-                        filled: true,
-                        fillColor: Colors.white,
+                        labelText: 'サブカテゴリ',
                         border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                       ),
+                      items: currentSubList.map((s) {
+                        final str = s.toString();
+                        return DropdownMenuItem(value: str, child: Text(str));
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            _selectedSubCategory = val.toString();
+                          });
+                        }
+                      },
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
-            ],
-            TextField(
-              controller: _contentController,
-              maxLines: 5,
-              decoration: InputDecoration(
-                labelText: _isRecipeMode ? 'ひとことコメント・コツなど（任意）' : '投稿内容（必須）',
-                hintText: '一人暮らしの知恵や今日のご飯、質問などを自由に書こう！',
-                border: const OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: _pickMultipleImages,
-                  icon: const Icon(Icons.photo_library_outlined),
-                  label: Text(
-                    _imageBytesList.isEmpty
-                        ? 'スクショ・画像を選択（複数可）'
-                        : '画像をさらに追加（現在${_imageBytesList.length}枚）',
+              if (_isRecipeMode) ...[
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.orange.shade200),
                   ),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _pickCameraImage,
-                  icon: const Icon(Icons.camera_alt_outlined),
-                  label: const Text('カメラ'),
-                ),
-                if (_imageBytesList.isNotEmpty)
-                  TextButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _imageBytesList.clear();
-                      });
-                    },
-                    icon: const Icon(Icons.delete_sweep, color: Colors.red),
-                    label: const Text(
-                      'すべてクリア',
-                      style: TextStyle(color: Colors.red),
-                    ),
-                  ),
-              ],
-            ),
-            if (_imageBytesList.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              ...List.generate(_imageBytesList.length, (idx) {
-                final bytes = _imageBytesList[idx] as Uint8List;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 14.0),
-                  child: Stack(
-                    alignment: Alignment.topRight,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(
-                        height: 220,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade900,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        clipBehavior: Clip.antiAlias,
-                        child: Image.memory(
-                          bytes,
-                          fit: BoxFit.contain,
-                          gaplessPlayback: true,
+                      TextField(
+                        controller: _recipeTitleController,
+                        decoration: const InputDecoration(
+                          labelText: '料理名（必須）',
+                          hintText: '例：豚バラとキャベツの旨塩炒め',
+                          filled: true,
+                          fillColor: Colors.white,
+                          border: OutlineInputBorder(),
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.all(6.0),
-                        child: IconButton(
-                          icon: const CircleAvatar(
-                            radius: 15,
-                            backgroundColor: Colors.black87,
-                            child: Icon(
-                              Icons.close,
-                              size: 18,
-                              color: Colors.white,
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _recipeCostController,
+                              decoration: const InputDecoration(
+                                labelText: '目安費用',
+                                hintText: '例：約180円',
+                                filled: true,
+                                fillColor: Colors.white,
+                                border: OutlineInputBorder(),
+                              ),
                             ),
                           ),
-                          onPressed: () {
-                            setState(() {
-                              _imageBytesList.removeAt(idx);
-                            });
-                          },
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: TextField(
+                              controller: _recipeTimeController,
+                              decoration: const InputDecoration(
+                                labelText: '調理時間',
+                                hintText: '例：約10分',
+                                filled: true,
+                                fillColor: Colors.white,
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            '基準の人数（何人分の分量か）',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Row(
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.remove_circle_outline),
+                                onPressed: _baseServings > 1
+                                    ? () {
+                                        setState(() {
+                                          _baseServings--;
+                                        });
+                                      }
+                                    : null,
+                              ),
+                              Text(
+                                '$_baseServings人分',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.add_circle_outline),
+                                onPressed: _baseServings < 6
+                                    ? () {
+                                        setState(() {
+                                          _baseServings++;
+                                        });
+                                      }
+                                    : null,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const Divider(),
+                      const Text(
+                        '材料リスト（数値を入れると自動で人数計算されます）',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ...List.generate(_ingredientRows.length, (idx) {
+                        final mapRow = _ingredientRows[idx] as Map;
+                        final nameCtrl =
+                            mapRow['name'] as TextEditingController;
+                        final amountCtrl =
+                            mapRow['amount'] as TextEditingController;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8.0),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 3,
+                                child: TextField(
+                                  controller: nameCtrl,
+                                  decoration: const InputDecoration(
+                                    hintText: '材料名（例：豚肉）',
+                                    filled: true,
+                                    fillColor: Colors.white,
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                flex: 2,
+                                child: TextField(
+                                  controller: amountCtrl,
+                                  decoration: const InputDecoration(
+                                    hintText: '分量（例：100g）',
+                                    filled: true,
+                                    fillColor: Colors.white,
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.remove_circle,
+                                  color: Colors.redAccent,
+                                ),
+                                onPressed: () => _removeIngredientRow(idx),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                      TextButton.icon(
+                        onPressed: _addIngredientRow,
+                        icon: const Icon(Icons.add),
+                        label: const Text('材料を追加する'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _recipeStepsController,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          labelText: '作り方・手順',
+                          hintText: '1. 野菜を切る\n2. フライパンで炒める...',
+                          filled: true,
+                          fillColor: Colors.white,
+                          border: OutlineInputBorder(),
                         ),
                       ),
                     ],
                   ),
-                );
-              }),
+                ),
+                const SizedBox(height: 16),
+              ],
+              TextField(
+                controller: _contentController,
+                maxLines: 5,
+                decoration: InputDecoration(
+                  labelText: _isRecipeMode ? 'ひとことコメント・コツなど（任意）' : '投稿内容（必須）',
+                  hintText: '一人暮らしの知恵や今日のご飯、質問などを自由に書こう！',
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _pickMultipleImages,
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: Text(
+                      _imageBytesList.isEmpty
+                          ? 'スクショ・画像を選択（複数可）'
+                          : '画像をさらに追加（現在${_imageBytesList.length}枚）',
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _pickCameraImage,
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: const Text('カメラ'),
+                  ),
+                  if (_imageBytesList.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _imageBytesList.clear();
+                        });
+                      },
+                      icon: const Icon(Icons.delete_sweep, color: Colors.red),
+                      label: const Text(
+                        'すべてクリア',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                ],
+              ),
+              if (_imageBytesList.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                ...List.generate(_imageBytesList.length, (idx) {
+                  final bytes = _imageBytesList[idx] as Uint8List;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 14.0),
+                    child: Stack(
+                      alignment: Alignment.topRight,
+                      children: [
+                        Container(
+                          height: 220,
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade900,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: Image.memory(
+                            bytes,
+                            fit: BoxFit.contain,
+                            gaplessPlayback: true,
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.all(6.0),
+                          child: IconButton(
+                            icon: const CircleAvatar(
+                              radius: 15,
+                              backgroundColor: Colors.black87,
+                              child: Icon(
+                                Icons.close,
+                                size: 18,
+                                color: Colors.white,
+                              ),
+                            ),
+                            onPressed: () {
+                              setState(() {
+                                _imageBytesList.removeAt(idx);
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     ),

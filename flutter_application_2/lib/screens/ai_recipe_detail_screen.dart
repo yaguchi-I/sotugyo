@@ -3,20 +3,115 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
+class AiRecipeDetailScreen extends StatelessWidget {
+  final String postId;
+
+  const AiRecipeDetailScreen({super.key, required this.postId});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0),
+      body: FutureBuilder(
+        future: FirebaseFirestore.instance
+            .collection('posts')
+            .doc(postId)
+            .get(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!snapshot.hasData || snapshot.data == null) {
+            return const Center(child: Text('データが見つかりません'));
+          }
+
+          final docSnap = snapshot.data as DocumentSnapshot;
+          if (!docSnap.exists || docSnap.data() == null) {
+            return const Center(child: Text('データが見つかりません'));
+          }
+
+          final data = docSnap.data() as Map;
+          final content = (data['content'] ?? '').toString();
+          final subCategory = (data['subCategory'] ?? 'レシピ').toString();
+
+          final bool isRecipe = subCategory == 'レシピ';
+
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: double.infinity,
+                  height: 200,
+                  color: isRecipe
+                      ? Colors.orange.shade50
+                      : Colors.green.shade50,
+                  child: Icon(
+                    isRecipe ? Icons.restaurant_menu : Icons.lightbulb_outline,
+                    size: 80,
+                    color: isRecipe ? Colors.orange : Colors.green,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.auto_awesome,
+                            color: isRecipe ? Colors.purple : Colors.teal,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            isRecipe ? 'AIが考えたあなた専用レシピ' : 'AIからの生活アドバイス',
+                            style: TextStyle(
+                              color: isRecipe
+                                  ? Colors.purple.shade700
+                                  : Colors.teal.shade700,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        content,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          height: 1.8,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 40),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class CookingScreen extends StatefulWidget {
   const CookingScreen({super.key});
 
   @override
-  State<CookingScreen> createState() => _CookingScreenState();
+  State createState() => _CookingScreenState();
 }
 
-class _CookingScreenState extends State<CookingScreen>
-    with SingleTickerProviderStateMixin {
+class _CookingScreenState extends State with SingleTickerProviderStateMixin {
   static const String _apiKey = '';
 
   late TabController _tabController;
   final String _currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
-  final Set<String> _savedRecipeIds = {};
+  final Set _savedRecipeIds = Set();
 
   final List _recipes = [
     {
@@ -79,7 +174,7 @@ class _CookingScreenState extends State<CookingScreen>
     _loadSavedRecipes();
   }
 
-  Future<void> _loadSavedRecipes() async {
+  Future _loadSavedRecipes() async {
     if (_currentUserId.isEmpty) return;
     try {
       final doc = await FirebaseFirestore.instance
@@ -88,15 +183,13 @@ class _CookingScreenState extends State<CookingScreen>
           .get();
       if (doc.exists && doc.data()?['savedCookingRecipes'] != null) {
         setState(() {
-          _savedRecipeIds.addAll(
-            List<String>.from(doc.data()!['savedCookingRecipes']),
-          );
+          _savedRecipeIds.addAll(List.from(doc.data()!['savedCookingRecipes']));
         });
       }
     } catch (e) {}
   }
 
-  Future<void> _toggleSaveRecipe(String recipeId) async {
+  Future _toggleSaveRecipe(String recipeId) async {
     if (_currentUserId.isEmpty) return;
     setState(() {
       if (_savedRecipeIds.contains(recipeId)) {
@@ -115,7 +208,7 @@ class _CookingScreenState extends State<CookingScreen>
     } catch (e) {}
   }
 
-  Future<void> _showAiAlternativeDialog(Map<String, dynamic> recipe) async {
+  Future _showAiAlternativeDialog(Map recipe) async {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -136,16 +229,14 @@ class _CookingScreenState extends State<CookingScreen>
     String resultText = '';
 
     try {
-      List<String> missingAppliances = [];
+      List missingAppliances = [];
       if (_currentUserId.isNotEmpty) {
         final userDoc = await FirebaseFirestore.instance
             .collection('users')
             .doc(_currentUserId)
             .get();
         if (userDoc.exists && userDoc.data()?['missingAppliances'] != null) {
-          missingAppliances = List<String>.from(
-            userDoc.data()!['missingAppliances'],
-          );
+          missingAppliances = List.from(userDoc.data()!['missingAppliances']);
         }
       }
 
@@ -210,7 +301,7 @@ class _CookingScreenState extends State<CookingScreen>
   @override
   Widget build(BuildContext context) {
     final savedRecipes = _recipes
-        .where((r) => _savedRecipeIds.contains(r['id']))
+        .where((r) => _savedRecipeIds.contains((r as Map)['id']))
         .toList();
 
     return Scaffold(
@@ -253,10 +344,10 @@ class _CookingScreenState extends State<CookingScreen>
       ),
       itemCount: recipes.length,
       itemBuilder: (context, index) {
-        final recipe = recipes[index];
+        final recipe = recipes[index] as Map;
         final isSaved = _savedRecipeIds.contains(recipe['id']);
-        final ingredients = List<String>.from(recipe['ingredients']);
-        final steps = List<String>.from(recipe['steps']);
+        final ingredients = List.from(recipe['ingredients']);
+        final steps = List.from(recipe['steps']);
 
         return Card(
           margin: const EdgeInsets.only(bottom: 16.0),
@@ -274,7 +365,7 @@ class _CookingScreenState extends State<CookingScreen>
                   children: [
                     Expanded(
                       child: Text(
-                        recipe['title'],
+                        recipe['title'].toString(),
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -296,7 +387,8 @@ class _CookingScreenState extends State<CookingScreen>
                             isSaved ? Icons.bookmark : Icons.bookmark_border,
                             color: isSaved ? Colors.blue : Colors.grey,
                           ),
-                          onPressed: () => _toggleSaveRecipe(recipe['id']),
+                          onPressed: () =>
+                              _toggleSaveRecipe(recipe['id'].toString()),
                         ),
                       ],
                     ),
@@ -308,7 +400,7 @@ class _CookingScreenState extends State<CookingScreen>
                     Icon(Icons.schedule, size: 16, color: Colors.grey.shade600),
                     const SizedBox(width: 4),
                     Text(
-                      recipe['time'],
+                      recipe['time'].toString(),
                       style: TextStyle(color: Colors.grey.shade600),
                     ),
                     const SizedBox(width: 16),
@@ -319,7 +411,7 @@ class _CookingScreenState extends State<CookingScreen>
                     ),
                     const SizedBox(width: 4),
                     Text(
-                      recipe['cost'],
+                      recipe['cost'].toString(),
                       style: TextStyle(color: Colors.grey.shade600),
                     ),
                   ],
