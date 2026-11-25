@@ -11,6 +11,7 @@ import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
 import 'ai_chat_screen.dart' show AiChatScreen;
 import 'sns_reply_screen.dart' show SnsReplyScreen;
 import 'sns_screen.dart' show PostImageCarousel;
+import 'user_profile_screen.dart' show UserProfileScreen;
 import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsDetailScreen extends StatefulWidget {
@@ -35,6 +36,24 @@ class _SnsDetailScreenState extends State {
   int? _customServings;
   final Map _imageCache = {};
   final Map _iconCache = {};
+
+  void _openUserProfile(
+    BuildContext context, {
+    required String userId,
+    required String userName,
+    required String iconBase64,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => UserProfileScreen(
+          userId: userId,
+          userName: userName,
+          initialIconBase64: iconBase64,
+        ),
+      ),
+    );
+  }
 
   void _recordDetailImpressionOnce({
     required int likes,
@@ -616,26 +635,44 @@ class _SnsDetailScreenState extends State {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: Colors.blue.shade100,
-                backgroundImage: iconBytes != null
-                    ? MemoryImage(iconBytes)
-                    : null,
-                child: iconBytes == null
-                    ? const Icon(Icons.person, size: 20, color: Colors.blue)
-                    : null,
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _openUserProfile(
+                  context,
+                  userId: targetLookupUid,
+                  userName: displayName,
+                  iconBase64: displayIconBase64,
+                ),
+                child: CircleAvatar(
+                  radius: 18,
+                  backgroundColor: Colors.blue.shade100,
+                  backgroundImage: iconBytes != null
+                      ? MemoryImage(iconBytes)
+                      : null,
+                  child: iconBytes == null
+                      ? const Icon(Icons.person, size: 20, color: Colors.blue)
+                      : null,
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      displayName,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _openUserProfile(
+                        context,
+                        userId: targetLookupUid,
+                        userName: displayName,
+                        iconBase64: displayIconBase64,
+                      ),
+                      child: Text(
+                        displayName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -871,18 +908,27 @@ class _SnsDetailScreenState extends State {
                             children: [
                               Row(
                                 children: [
-                                  CircleAvatar(
-                                    radius: 22,
-                                    backgroundColor: Colors.blue.shade100,
-                                    backgroundImage: userIconBytes != null
-                                        ? MemoryImage(userIconBytes)
-                                        : null,
-                                    child: userIconBytes == null
-                                        ? const Icon(
-                                            Icons.person,
-                                            color: Colors.blue,
-                                          )
-                                        : null,
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => _openUserProfile(
+                                      context,
+                                      userId: targetLookupUid,
+                                      userName: displayUserName,
+                                      iconBase64: displayIconBase64,
+                                    ),
+                                    child: CircleAvatar(
+                                      radius: 22,
+                                      backgroundColor: Colors.blue.shade100,
+                                      backgroundImage: userIconBytes != null
+                                          ? MemoryImage(userIconBytes)
+                                          : null,
+                                      child: userIconBytes == null
+                                          ? const Icon(
+                                              Icons.person,
+                                              color: Colors.blue,
+                                            )
+                                          : null,
+                                    ),
                                   ),
                                   const SizedBox(width: 12),
                                   Expanded(
@@ -892,11 +938,20 @@ class _SnsDetailScreenState extends State {
                                       spacing: 6,
                                       runSpacing: 4,
                                       children: [
-                                        Text(
-                                          displayUserName,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
+                                        GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () => _openUserProfile(
+                                            context,
+                                            userId: targetLookupUid,
+                                            userName: displayUserName,
+                                            iconBase64: displayIconBase64,
+                                          ),
+                                          child: Text(
+                                            displayUserName,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
                                           ),
                                         ),
                                         if (post['mainCategory'] != null &&
