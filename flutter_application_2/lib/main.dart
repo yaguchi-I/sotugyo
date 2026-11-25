@@ -7,14 +7,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 
-import 'firebase_options.dart';
-import 'screens/auth_screen.dart';
-import 'screens/sns_screen.dart';
-import 'screens/budget_screen.dart';
-import 'screens/ai_chat_screen.dart';
-import 'screens/sns_search_screen.dart';
-import 'screens/sns_bookmark_screen.dart';
-import 'screens/cooking_screen.dart';
+import 'firebase_options.dart' show DefaultFirebaseOptions;
+import 'screens/auth_screen.dart' show AuthScreen;
+import 'screens/sns_screen.dart' show SnsScreen;
+import 'screens/budget_screen.dart' show BudgetScreen;
+import 'screens/ai_chat_screen.dart' show AiChatScreen;
+import 'screens/sns_search_screen.dart' show SnsSearchScreen;
+import 'screens/sns_bookmark_screen.dart' show SnsBookmarkScreen;
+import 'screens/cooking_screen.dart' show CookingScreen;
+import 'screens/onboarding_screen.dart' show OnboardingScreen;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,7 +23,6 @@ void main() async {
   runApp(const MyApp());
 }
 
-/// アプリ全体の配色。ここを変えるだけで全画面のテーマ色が変わる
 const Color kBrandColor = Color(0xFF2F80ED);
 
 class MyApp extends StatelessWidget {
@@ -79,7 +79,7 @@ class MyApp extends StatelessWidget {
       title: 'ソロナンデス',
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(),
-      home: StreamBuilder(
+      home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -87,8 +87,9 @@ class MyApp extends StatelessWidget {
               body: Center(child: CircularProgressIndicator()),
             );
           }
-          if (snapshot.hasData) {
-            return const MainScreen();
+          final user = snapshot.data;
+          if (user != null) {
+            return MainScreen(key: ValueKey(user.uid));
           }
           return const AuthScreen();
         },
@@ -97,7 +98,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/// 画面1つ分の情報（アイコン・名前・説明）
 class _AppPage {
   final Widget screen;
   final IconData icon;
@@ -118,12 +118,10 @@ class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
   @override
-  State createState() => _MainScreenState();
+  State<MainScreen> createState() => _MainScreenState();
 }
 
 class _MainScreenState extends State<MainScreen> {
-  // ---- 画面の番号（_pages の並び順と一致させる） ----
-  // ※投稿画面はタブではなく、タイムラインの右下ボタンから開く
   static const int _home = 0;
   static const int _search = 1;
   static const int _budget = 2;
@@ -176,19 +174,16 @@ class _MainScreenState extends State<MainScreen> {
     ),
   ];
 
-  /// 下のバーに常に出すタブ（ここに番号を足せばタブが増える）
-  static const List<int> _tabIndexes = [
-    _home,
-    _search,
-    _budget,
-    _cooking,
-    _ai,
-  ];
+  static const List<int> _tabIndexes = [_home, _search, _budget, _cooking, _ai];
 
   int _currentIndex = _home;
-
-  /// 一度開いた画面だけ作る（起動時に全画面の通信が走らないように）
   final Set<int> _loadedIndexes = {_home};
+  bool _localOnboardingDone = false;
+
+  late final String _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+  late final Stream<DocumentSnapshot>? _userStream = _uid.isNotEmpty
+      ? FirebaseFirestore.instance.collection('users').doc(_uid).snapshots()
+      : null;
 
   void _goTo(int index) {
     if (index == _currentIndex) return;
@@ -214,19 +209,38 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     final currentUser = FirebaseAuth.instance.currentUser;
-    final uid = currentUser?.uid ?? '';
 
-    return StreamBuilder(
-      stream: uid.isNotEmpty
-          ? FirebaseFirestore.instance.collection('users').doc(uid).snapshots()
-          : null,
+    return StreamBuilder<DocumentSnapshot>(
+      stream: _userStream,
       builder: (context, snapshot) {
+        if (_uid.isNotEmpty &&
+            snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
         Map userData = {};
         if (snapshot.hasData && snapshot.data != null) {
-          final doc = snapshot.data as DocumentSnapshot;
+          final doc = snapshot.data!;
           if (doc.exists && doc.data() != null) {
             userData = Map.from(doc.data() as Map);
           }
+        }
+
+        final bool hasSeenOnboarding =
+            _localOnboardingDone || userData['hasSeenOnboarding'] == true;
+        if (_uid.isNotEmpty && !hasSeenOnboarding) {
+          return OnboardingScreen(
+            onComplete: () {
+              if (mounted) {
+                setState(() {
+                  _localOnboardingDone = true;
+                });
+              }
+            },
+          );
         }
 
         final userName = userData['userName']?.toString().isNotEmpty == true
@@ -235,7 +249,6 @@ class _MainScreenState extends State<MainScreen> {
         final email = currentUser?.email ?? '';
         final iconBytes = _decodeIcon(userData['iconBase64']?.toString());
 
-        // Androidの戻るボタン：ホーム以外ならホームへ戻す
         return PopScope(
           canPop: _currentIndex == _home,
           onPopInvokedWithResult: (didPop, result) {
@@ -263,8 +276,6 @@ class _MainScreenState extends State<MainScreen> {
       },
     );
   }
-
-  // ===================== 下のタブバー =====================
 
   Widget _buildBottomBar(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -307,9 +318,7 @@ class _MainScreenState extends State<MainScreen> {
               duration: const Duration(milliseconds: 200),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               decoration: BoxDecoration(
-                color: selected
-                    ? scheme.primaryContainer
-                    : Colors.transparent,
+                color: selected ? scheme.primaryContainer : Colors.transparent,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Icon(
@@ -333,20 +342,27 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // ===================== 左メニュー（ドロワー） =====================
-
   Widget _buildDrawer({
     required String userName,
     required String email,
     required Uint8List? iconBytes,
     required Map userData,
   }) {
+    final List allergies = userData['allergies'] is List
+        ? List.from(userData['allergies'])
+              .map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList()
+        : [];
+    final String settingsSubtitle = allergies.isNotEmpty
+        ? '地域・家電・アレルギー除外（${allergies.join('・')}）'
+        : 'お住まいの地域・ない家電・アレルギー除外';
+
     return Drawer(
       child: SafeArea(
         child: ListView(
           padding: EdgeInsets.zero,
           children: [
-            // ---- プロフィール（タップで編集） ----
             InkWell(
               onTap: () {
                 Navigator.pop(context);
@@ -365,11 +381,15 @@ class _MainScreenState extends State<MainScreen> {
                     CircleAvatar(
                       radius: 28,
                       backgroundColor: Colors.blue.shade50,
-                      backgroundImage:
-                          iconBytes != null ? MemoryImage(iconBytes) : null,
+                      backgroundImage: iconBytes != null
+                          ? MemoryImage(iconBytes)
+                          : null,
                       child: iconBytes == null
-                          ? const Icon(Icons.person,
-                              size: 30, color: kBrandColor)
+                          ? const Icon(
+                              Icons.person,
+                              size: 30,
+                              color: kBrandColor,
+                            )
                           : null,
                     ),
                     const SizedBox(width: 14),
@@ -411,23 +431,26 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
             const Divider(height: 1),
-
-            // ---- 全機能の一覧（説明つき） ----
             _drawerSectionTitle('みんなとつながる'),
             _drawerPageTile(_home),
             _drawerPageTile(_search),
             _drawerPageTile(_bookmark),
-
             _drawerSectionTitle('じぶんの暮らし'),
             _drawerPageTile(_budget),
             _drawerPageTile(_ai),
             _drawerPageTile(_cooking),
-
             const Divider(),
             ListTile(
-              leading: const Icon(Icons.settings_outlined),
-              title: const Text('地域・調理家電の設定'),
-              subtitle: const Text('お住まいの地域・持っていない家電'),
+              leading: Icon(
+                Icons.settings_outlined,
+                color: allergies.isNotEmpty ? Colors.redAccent : null,
+              ),
+              title: const Text('地域・調理家電・アレルギー設定'),
+              subtitle: Text(
+                settingsSubtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               onTap: () {
                 Navigator.pop(context);
                 Navigator.push(
@@ -440,11 +463,22 @@ class _MainScreenState extends State<MainScreen> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.menu_book_outlined),
+              title: const Text('アプリの使い方ガイド'),
+              subtitle: const Text('主な機能をスライドで確認'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const OnboardingScreen(isReplay: true),
+                  ),
+                );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
-              title: const Text(
-                'ログアウト',
-                style: TextStyle(color: Colors.red),
-              ),
+              title: const Text('ログアウト', style: TextStyle(color: Colors.red)),
               onTap: _confirmLogout,
             ),
             const SizedBox(height: 16),
@@ -503,7 +537,7 @@ class _MainScreenState extends State<MainScreen> {
       ),
     );
     if (ok == true) {
-      if (mounted) Navigator.pop(context); // ドロワーを閉じる
+      if (mounted) Navigator.pop(context);
       await FirebaseAuth.instance.signOut();
     }
   }
@@ -515,7 +549,7 @@ class AccountEditScreen extends StatefulWidget {
   const AccountEditScreen({super.key, required this.initialUserData});
 
   @override
-  State createState() => _AccountEditScreenState();
+  State<AccountEditScreen> createState() => _AccountEditScreenState();
 }
 
 class _AccountEditScreenState extends State<AccountEditScreen> {
@@ -530,7 +564,8 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
   @override
   void initState() {
     super.initState();
-    final initName = widget.initialUserData['userName']?.toString() ??
+    final initName =
+        widget.initialUserData['userName']?.toString() ??
         FirebaseAuth.instance.currentUser?.displayName ??
         '';
     _nameController = TextEditingController(text: initName);
@@ -538,9 +573,7 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
     _iconBase64 = widget.initialUserData['iconBase64']?.toString() ?? '';
     _previewIconBytes = _decodeIcon(_iconBase64);
     if (widget.initialUserData['interestedTags'] != null) {
-      _selectedTags.addAll(
-        List.from(widget.initialUserData['interestedTags']),
-      );
+      _selectedTags.addAll(List.from(widget.initialUserData['interestedTags']));
     }
   }
 
@@ -563,6 +596,30 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
     }
   }
 
+  DateTime? _parseBirthday(String raw) {
+    if (raw.trim().isEmpty) return null;
+    final normalized = raw
+        .replaceAll('年', '/')
+        .replaceAll('月', '/')
+        .replaceAll('日', '')
+        .replaceAll('-', '/')
+        .trim();
+    final match = RegExp(r'(\d{4})/(\d{1,2})/(\d{1,2})').firstMatch(normalized);
+    if (match == null) return null;
+    final y = int.tryParse(match.group(1) ?? '');
+    final m = int.tryParse(match.group(2) ?? '');
+    final d = int.tryParse(match.group(3) ?? '');
+    if (y == null || m == null || d == null) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return DateTime(y, m, d);
+  }
+
+  String _formatBirthdayForDisplay(String raw) {
+    final dt = _parseBirthday(raw);
+    if (dt == null) return raw;
+    return '${dt.year}年${dt.month}月${dt.day}日';
+  }
+
   Future _pickImage(ImageSource source) async {
     try {
       final picker = ImagePicker();
@@ -583,20 +640,16 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('画像の読み込みに失敗しました: $e')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('画像の読み込みに失敗しました: $e')));
       }
     }
   }
 
   Future _pickBirthday() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: DateTime(now.year - 20, 1, 1),
-      firstDate: DateTime(1920, 1, 1),
-      lastDate: now,
+    final picked = await AuthScreen.showJapaneseBirthdayPicker(
+      context,
+      initialDate: _parseBirthday(_birthdayStr),
     );
     if (picked != null && mounted) {
       final m = picked.month.toString().padLeft(2, '0');
@@ -613,9 +666,7 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
     final newName = _nameController.text.trim();
 
     if (newName.isEmpty) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('ユーザー名を入力してください')),
-      );
+      messenger.showSnackBar(const SnackBar(content: Text('ユーザー名を入力してください')));
       return;
     }
     if (newName.length > 15) {
@@ -642,9 +693,7 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
           _isSaving = false;
         });
         messenger.showSnackBar(
-          const SnackBar(
-            content: Text('このユーザー名は既に使われています。別の名前を入力してください。'),
-          ),
+          const SnackBar(content: Text('このユーザー名は既に使われています。別の名前を入力してください。')),
         );
         return;
       }
@@ -662,18 +711,14 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
       }
 
       if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(content: Text('アカウント情報を更新しました！')),
-      );
+      messenger.showSnackBar(const SnackBar(content: Text('アカウント情報を更新しました！')));
       navigator.pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
       });
-      messenger.showSnackBar(
-        SnackBar(content: Text('更新に失敗しました: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('更新に失敗しました: $e')));
     }
   }
 
@@ -742,29 +787,46 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            const Text(
-              '生年月日',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
+            const Text('生年月日', style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             InkWell(
+              borderRadius: BorderRadius.circular(12),
               onTap: _pickBirthday,
               child: InputDecorator(
                 decoration: const InputDecoration(
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.cake_outlined),
+                  suffixIcon: Icon(Icons.arrow_drop_down),
                 ),
                 child: Text(
-                  _birthdayStr.isNotEmpty ? _birthdayStr : 'タップして選択',
+                  _birthdayStr.isNotEmpty
+                      ? _formatBirthdayForDisplay(_birthdayStr)
+                      : 'タップして生年月日を選択',
                 ),
               ),
             ),
             const SizedBox(height: 24),
-            const Text(
-              '興味のあるタグ（「おすすめ」タイムラインに優先表示）',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Expanded(
+                  child: Text(
+                    '興味のあるタグ（任意・未選択なら通常のタイムライン）',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (_selectedTags.isNotEmpty)
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _selectedTags.clear();
+                      });
+                    },
+                    child: const Text('すべて解除', style: TextStyle(fontSize: 12)),
+                  ),
+              ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -831,13 +893,16 @@ class AppSettingsScreen extends StatefulWidget {
   const AppSettingsScreen({super.key, required this.initialUserData});
 
   @override
-  State createState() => _AppSettingsScreenState();
+  State<AppSettingsScreen> createState() => _AppSettingsScreenState();
 }
 
 class _AppSettingsScreenState extends State<AppSettingsScreen> {
   final String _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
   late TextEditingController _areaController;
+  final TextEditingController _customAllergyController =
+      TextEditingController();
   final List _missingAppliances = [];
+  final List _allergies = [];
   bool _isSaving = false;
 
   final List _allAppliances = [
@@ -861,15 +926,44 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         List.from(widget.initialUserData['missingAppliances']),
       );
     }
+    if (widget.initialUserData['allergies'] is List) {
+      _allergies.addAll(
+        List.from(widget.initialUserData['allergies'])
+            .map((e) => e.toString().trim())
+            .where((e) => e.isNotEmpty),
+      );
+    }
   }
 
   @override
   void dispose() {
     _areaController.dispose();
+    _customAllergyController.dispose();
     super.dispose();
   }
 
+  void _addCustomAllergy() {
+    final raw = _customAllergyController.text.trim();
+    if (raw.isEmpty) return;
+    final parts = raw
+        .split(RegExp(r'[\s 、,・/]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty);
+    setState(() {
+      for (final p in parts) {
+        if (!_allergies.contains(p)) {
+          _allergies.add(p);
+        }
+      }
+      _customAllergyController.clear();
+    });
+  }
+
   Future _saveSettings() async {
+    if (_customAllergyController.text.trim().isNotEmpty) {
+      _addCustomAllergy();
+    }
+
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
@@ -882,31 +976,32 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
         await FirebaseFirestore.instance.collection('users').doc(_uid).set({
           'area': _areaController.text.trim(),
           'missingAppliances': _missingAppliances,
+          'allergies': _allergies,
           'isAiSetupDone': true,
         }, SetOptions(merge: true));
       }
       if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(content: Text('設定を保存しました！')),
-      );
+      messenger.showSnackBar(const SnackBar(content: Text('設定を保存しました！')));
       navigator.pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
       });
-      messenger.showSnackBar(
-        SnackBar(content: Text('保存に失敗しました: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final List customAllergies = _allergies
+        .where((a) => !AiChatScreen.presetAllergens.contains(a))
+        .toList();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          '地域・調理家電の設定',
+          '地域・調理家電・アレルギー設定',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
       ),
@@ -955,6 +1050,90 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
                 );
               }).toList(),
             ),
+            const SizedBox(height: 24),
+            const Text(
+              'アレルギー・食べられない食材',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '選択・追加した食材はAI相談・AI自炊・検索のレシピから自動で除外されます。',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: AiChatScreen.presetAllergens.map((rawAllergen) {
+                final allergen = rawAllergen.toString();
+                final isSelected = _allergies.contains(allergen);
+                return FilterChip(
+                  label: Text(allergen),
+                  selected: isSelected,
+                  selectedColor: Colors.red.shade100,
+                  checkmarkColor: Colors.red.shade800,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        if (!_allergies.contains(allergen)) {
+                          _allergies.add(allergen);
+                        }
+                      } else {
+                        _allergies.remove(allergen);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _customAllergyController,
+                    decoration: const InputDecoration(
+                      hintText: 'その他を追加（例：大豆、ごま、さば）',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _addCustomAllergy(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _addCustomAllergy,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('追加'),
+                ),
+              ],
+            ),
+            if (customAllergies.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final rawCustom in customAllergies)
+                    InputChip(
+                      label: Text(
+                        rawCustom.toString(),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.red.shade900,
+                        ),
+                      ),
+                      backgroundColor: Colors.red.shade50,
+                      deleteIconColor: Colors.red.shade700,
+                      onDeleted: () {
+                        setState(() {
+                          _allergies.remove(rawCustom.toString());
+                        });
+                      },
+                    ),
+                ],
+              ),
+            ],
             const SizedBox(height: 32),
             SizedBox(
               width: double.infinity,

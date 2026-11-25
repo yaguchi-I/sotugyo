@@ -1,6 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' show PointerDeviceKind;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -24,11 +26,251 @@ class AuthScreen extends StatefulWidget {
     {'key': '収納:小物', 'label': '📦 収納：小物'},
   ];
 
+  static Future<DateTime?> showJapaneseBirthdayPicker(
+    BuildContext context, {
+    DateTime? initialDate,
+  }) {
+    final now = DateTime.now();
+    final fallback = DateTime(now.year - 20, 1, 1);
+    final base = initialDate ?? fallback;
+    final clampedYear = base.year.clamp(1920, now.year);
+    final maxMonth = clampedYear == now.year ? now.month : 12;
+    final clampedMonth = base.month.clamp(1, maxMonth);
+    final maxDay = (clampedYear == now.year && clampedMonth == now.month)
+        ? now.day
+        : DateTime(clampedYear, clampedMonth + 1, 0).day;
+    final clampedDay = base.day.clamp(1, maxDay);
+
+    return showModalBottomSheet<DateTime>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _JapaneseBirthdayPickerSheet(
+        initialYear: clampedYear,
+        initialMonth: clampedMonth,
+        initialDay: clampedDay,
+        maxDate: now,
+      ),
+    );
+  }
+
   @override
-  State createState() => _AuthScreenState();
+  State<AuthScreen> createState() => _AuthScreenState();
 }
 
-class _AuthScreenState extends State {
+class _JapaneseBirthdayPickerSheet extends StatefulWidget {
+  final int initialYear;
+  final int initialMonth;
+  final int initialDay;
+  final DateTime maxDate;
+
+  const _JapaneseBirthdayPickerSheet({
+    required this.initialYear,
+    required this.initialMonth,
+    required this.initialDay,
+    required this.maxDate,
+  });
+
+  @override
+  State<_JapaneseBirthdayPickerSheet> createState() =>
+      _JapaneseBirthdayPickerSheetState();
+}
+
+class _JapaneseBirthdayPickerSheetState
+    extends State<_JapaneseBirthdayPickerSheet> {
+  static const int _minYear = 1920;
+
+  late int _selectedYear;
+  late int _selectedMonth;
+  late int _selectedDay;
+
+  late FixedExtentScrollController _yearController;
+  late FixedExtentScrollController _monthController;
+  late FixedExtentScrollController _dayController;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedYear = widget.initialYear;
+    _selectedMonth = widget.initialMonth;
+    _selectedDay = widget.initialDay;
+
+    _yearController = FixedExtentScrollController(
+      initialItem: _selectedYear - _minYear,
+    );
+    _monthController = FixedExtentScrollController(
+      initialItem: _selectedMonth - 1,
+    );
+    _dayController = FixedExtentScrollController(initialItem: _selectedDay - 1);
+  }
+
+  @override
+  void dispose() {
+    _yearController.dispose();
+    _monthController.dispose();
+    _dayController.dispose();
+    super.dispose();
+  }
+
+  int get _yearCount => widget.maxDate.year - _minYear + 1;
+
+  int get _maxMonthForSelectedYear =>
+      _selectedYear == widget.maxDate.year ? widget.maxDate.month : 12;
+
+  int get _maxDayForSelectedYearMonth {
+    final monthLastDay = DateTime(_selectedYear, _selectedMonth + 1, 0).day;
+    if (_selectedYear == widget.maxDate.year &&
+        _selectedMonth == widget.maxDate.month) {
+      return widget.maxDate.day < monthLastDay
+          ? widget.maxDate.day
+          : monthLastDay;
+    }
+    return monthLastDay;
+  }
+
+  void _clampMonthAndDay() {
+    final maxMonth = _maxMonthForSelectedYear;
+    if (_selectedMonth > maxMonth) {
+      _selectedMonth = maxMonth;
+      if (_monthController.hasClients) {
+        _monthController.jumpToItem(_selectedMonth - 1);
+      }
+    }
+    final maxDay = _maxDayForSelectedYearMonth;
+    if (_selectedDay > maxDay) {
+      _selectedDay = maxDay;
+      if (_dayController.hasClients) {
+        _dayController.jumpToItem(_selectedDay - 1);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final maxMonth = _maxMonthForSelectedYear;
+    final maxDay = _maxDayForSelectedYearMonth;
+
+    return SafeArea(
+      top: false,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('キャンセル'),
+                ),
+                Text(
+                  '$_selectedYear年$_selectedMonth月$_selectedDay日',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(
+                      context,
+                      DateTime(_selectedYear, _selectedMonth, _selectedDay),
+                    );
+                  },
+                  child: const Text(
+                    '決定',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          SizedBox(
+            height: 220,
+            child: ScrollConfiguration(
+              behavior: ScrollConfiguration.of(context)
+                  .copyWith(dragDevices: PointerDeviceKind.values.toSet()),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 4,
+                    child: CupertinoPicker(
+                      scrollController: _yearController,
+                      itemExtent: 40,
+                      onSelectedItemChanged: (index) {
+                        setState(() {
+                          _selectedYear = _minYear + index;
+                          _clampMonthAndDay();
+                        });
+                      },
+                      children: List.generate(_yearCount, (index) {
+                        final year = _minYear + index;
+                        return Center(
+                          child: Text(
+                            '$year年',
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  Expanded(
+                    flex: 3,
+                    child: CupertinoPicker(
+                      scrollController: _monthController,
+                      itemExtent: 40,
+                      onSelectedItemChanged: (index) {
+                        setState(() {
+                          _selectedMonth = index + 1;
+                          _clampMonthAndDay();
+                        });
+                      },
+                      children: List.generate(maxMonth, (index) {
+                        return Center(
+                          child: Text(
+                            '${index + 1}月',
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  Expanded(
+                    flex: 3,
+                    child: CupertinoPicker(
+                      scrollController: _dayController,
+                      itemExtent: 40,
+                      onSelectedItemChanged: (index) {
+                        setState(() {
+                          _selectedDay = index + 1;
+                        });
+                      },
+                      children: List.generate(maxDay, (index) {
+                        return Center(
+                          child: Text(
+                            '${index + 1}日',
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuthScreenState extends State<AuthScreen> {
   bool _isLogin = true;
   int _signUpStep = 1;
   bool _isLoading = false;
@@ -39,7 +281,7 @@ class _AuthScreenState extends State {
   final TextEditingController _userNameController = TextEditingController();
 
   DateTime? _selectedBirthday;
-  File? _selectedIconFile;
+  Uint8List? _selectedIconBytes;
   String? _iconBase64;
   final List _selectedInterestTags = [];
 
@@ -61,12 +303,13 @@ class _AuthScreenState extends State {
         imageQuality: 70,
       );
       if (picked != null && mounted) {
-        final file = File(picked.path);
-        final bytes = await file.readAsBytes();
-        setState(() {
-          _selectedIconFile = file;
-          _iconBase64 = base64Encode(bytes);
-        });
+        final bytes = await picked.readAsBytes();
+        if (mounted) {
+          setState(() {
+            _selectedIconBytes = bytes;
+            _iconBase64 = base64Encode(bytes);
+          });
+        }
       }
     } catch (e) {}
   }
@@ -100,12 +343,9 @@ class _AuthScreenState extends State {
   }
 
   Future _pickBirthday() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _selectedBirthday ?? DateTime(now.year - 20, 1, 1),
-      firstDate: DateTime(1920, 1, 1),
-      lastDate: now,
+    final picked = await AuthScreen.showJapaneseBirthdayPicker(
+      context,
+      initialDate: _selectedBirthday,
     );
     if (picked != null && mounted) {
       setState(() {
@@ -114,10 +354,14 @@ class _AuthScreenState extends State {
     }
   }
 
-  String _formatBirthday(DateTime date) {
+  String _formatBirthdayForDb(DateTime date) {
     final m = date.month.toString().padLeft(2, '0');
     final d = date.day.toString().padLeft(2, '0');
     return '${date.year}/$m/$d';
+  }
+
+  String _formatBirthdayForDisplay(DateTime date) {
+    return '${date.year}年${date.month}月${date.day}日';
   }
 
   Future _isUserNameTaken(String name) async {
@@ -205,13 +449,6 @@ class _AuthScreenState extends State {
         );
         return;
       }
-    } else {
-      if (_selectedInterestTags.isEmpty) {
-        messenger.showSnackBar(
-          const SnackBar(content: Text('興味のあるタグを1つ以上選んでください')),
-        );
-        return;
-      }
     }
 
     setState(() {
@@ -246,7 +483,7 @@ class _AuthScreenState extends State {
         if (user != null) {
           await user.updateDisplayName(userName);
           final birthdayStr = _selectedBirthday != null
-              ? _formatBirthday(_selectedBirthday!)
+              ? _formatBirthdayForDb(_selectedBirthday!)
               : '';
           await FirebaseFirestore.instance
               .collection('users')
@@ -313,20 +550,20 @@ class _AuthScreenState extends State {
                 CircleAvatar(
                   radius: 44,
                   backgroundColor: Colors.blue.shade50,
-                  backgroundImage: _selectedIconFile != null
-                      ? FileImage(_selectedIconFile!)
+                  backgroundImage: _selectedIconBytes != null
+                      ? MemoryImage(_selectedIconBytes!)
                       : null,
-                  child: _selectedIconFile == null
+                  child: _selectedIconBytes == null
                       ? const Icon(Icons.person, size: 44, color: Colors.blue)
                       : null,
                 ),
-                Positioned(
+                const Positioned(
                   right: 0,
                   bottom: 0,
                   child: CircleAvatar(
                     radius: 15,
                     backgroundColor: Colors.blue,
-                    child: const Icon(
+                    child: Icon(
                       Icons.camera_alt,
                       size: 16,
                       color: Colors.white,
@@ -349,16 +586,18 @@ class _AuthScreenState extends State {
         ),
         const SizedBox(height: 12),
         InkWell(
+          borderRadius: BorderRadius.circular(12),
           onTap: _pickBirthday,
           child: InputDecorator(
             decoration: const InputDecoration(
               labelText: '生年月日',
               prefixIcon: Icon(Icons.cake_outlined),
+              suffixIcon: Icon(Icons.arrow_drop_down),
               border: OutlineInputBorder(),
             ),
             child: Text(
               _selectedBirthday != null
-                  ? _formatBirthday(_selectedBirthday!)
+                  ? _formatBirthdayForDisplay(_selectedBirthday!)
                   : 'タップして生年月日を選択',
               style: TextStyle(
                 color: _selectedBirthday != null
@@ -428,19 +667,21 @@ class _AuthScreenState extends State {
   }
 
   Widget _buildSignUpStep2() {
+    final bool hasSelected = _selectedInterestTags.isNotEmpty;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Text(
-          '興味のあるタグを選択 (2/2)',
+          '興味のあるタグを選択（任意） (2/2)',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
         const Text(
-          '選んだタグの投稿が「おすすめ」タイムラインに優先表示されます（複数選択可）',
+          '選んだタグの投稿が「おすすめ」に優先表示されます。\n選ばずに進むと、偏りのない通常のタイムラインで始められます。',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 13, color: Colors.black54),
+          style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.45),
         ),
         const SizedBox(height: 20),
         Wrap(
@@ -512,10 +753,10 @@ class _AuthScreenState extends State {
                           color: Colors.white,
                         ),
                       )
-                    : const Text(
-                        'アカウントを作成する',
-                        style: TextStyle(
-                          fontSize: 16,
+                    : Text(
+                        hasSelected ? 'アカウントを作成する' : 'スキップして作成する',
+                        style: const TextStyle(
+                          fontSize: 15,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
