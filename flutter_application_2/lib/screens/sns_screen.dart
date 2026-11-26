@@ -13,6 +13,7 @@ import 'ai_chat_screen.dart' show AiChatScreen;
 import 'sns_reply_screen.dart' show SnsReplyScreen;
 import 'sns_detail_screen.dart' show SnsDetailScreen;
 import 'sns_add_screen.dart' show openPostScreen;
+import 'user_profile_screen.dart' show UserProfileScreen;
 import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsScreen extends StatefulWidget {
@@ -167,6 +168,61 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
         curve: Curves.easeOutCubic,
       );
     }
+  }
+
+  int _extractCreatedAtMillis(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map;
+    final raw = data['createdAt'];
+    if (raw is Timestamp) {
+      return raw.millisecondsSinceEpoch;
+    }
+    if (raw is DateTime) {
+      return raw.millisecondsSinceEpoch;
+    }
+    if (raw is int) {
+      return raw;
+    }
+    if (raw is String) {
+      final parsed = DateTime.tryParse(raw);
+      if (parsed != null) return parsed.millisecondsSinceEpoch;
+    }
+    if (doc.metadata.hasPendingWrites) {
+      return DateTime.now().millisecondsSinceEpoch;
+    }
+    return 0;
+  }
+
+  List _sortByNewest(List docs) {
+    final List sorted = List.from(docs);
+    sorted.sort((a, b) {
+      final docA = a as QueryDocumentSnapshot;
+      final docB = b as QueryDocumentSnapshot;
+      final timeA = _extractCreatedAtMillis(docA);
+      final timeB = _extractCreatedAtMillis(docB);
+      if (timeB != timeA) {
+        return timeB.compareTo(timeA);
+      }
+      return docB.id.compareTo(docA.id);
+    });
+    return sorted;
+  }
+
+  void _openUserProfile(
+    BuildContext context, {
+    required String userId,
+    required String userName,
+    required String iconBase64,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => UserProfileScreen(
+          userId: userId,
+          userName: userName,
+          initialIconBase64: iconBase64,
+        ),
+      ),
+    );
   }
 
   void _selectHashtagAndJump(String tag) {
@@ -1231,7 +1287,7 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
               List blockedUsers = [];
               List missingAppliances = [];
               List allergies = [];
-              List followingUsers = [];
+              final Set<String> followingSet = {};
 
               if (userPrefSnap.hasData && userPrefSnap.data != null) {
                 final uDoc = userPrefSnap.data as DocumentSnapshot;
@@ -1258,10 +1314,21 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         .toList();
                   }
                   if (uData[_followingField] is List) {
-                    followingUsers = List.from(uData[_followingField]);
+                    for (final item in List.from(uData[_followingField])) {
+                      final idStr = item?.toString().trim() ?? '';
+                      if (idStr.isNotEmpty) followingSet.add(idStr);
+                    }
+                  }
+                  if (uData['followingUsers'] is List) {
+                    for (final item in List.from(uData['followingUsers'])) {
+                      final idStr = item?.toString().trim() ?? '';
+                      if (idStr.isNotEmpty) followingSet.add(idStr);
+                    }
                   }
                 }
               }
+
+              final List followingUsers = followingSet.toList();
 
               return StreamBuilder(
                 stream: _postsStream,
@@ -1399,11 +1466,13 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       );
     }
 
-    final filtered = docs.where((d) {
-      final post = (d as QueryDocumentSnapshot).data() as Map;
-      final uid = post['userId']?.toString() ?? '';
-      return uid.isNotEmpty && followingUsers.contains(uid);
-    }).toList();
+    final filtered = _sortByNewest(
+      docs.where((d) {
+        final post = (d as QueryDocumentSnapshot).data() as Map;
+        final uid = post['userId']?.toString().trim() ?? '';
+        return uid.isNotEmpty && followingUsers.contains(uid);
+      }).toList(),
+    );
 
     if (filtered.isEmpty) {
       return _buildFollowingEmpty(
@@ -1528,13 +1597,15 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       });
     }
 
-    final filtered = _selectedHashtag.isEmpty
-        ? categoryDocs
-        : categoryDocs.where((d) {
-            final post = (d as QueryDocumentSnapshot).data() as Map;
-            final tags = SnsScreen.extractHashtagsFromPost(post);
-            return tags.contains(_selectedHashtag);
-          }).toList();
+    final filtered = _sortByNewest(
+      _selectedHashtag.isEmpty
+          ? categoryDocs
+          : categoryDocs.where((d) {
+              final post = (d as QueryDocumentSnapshot).data() as Map;
+              final tags = SnsScreen.extractHashtagsFromPost(post);
+              return tags.contains(_selectedHashtag);
+            }).toList(),
+    );
 
     final List mainList = [_all, ..._tagCategories.keys];
     final List subList = _tagMain == _all
@@ -1861,15 +1932,18 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   );
                   final isMatchedInterest = isRecommendedTab && score >= 2;
 
-                  return _buildPostCard(
-                    post: post,
-                    docId: doc.id,
-                    context: context,
-                    topicKey: topicKey,
-                    isTopicDemoted: isTopicDemoted,
-                    isMatchedInterest: isMatchedInterest,
-                    missingAppliances: missingAppliances,
-                    allergies: allergies,
+                  return KeyedSubtree(
+                    key: ValueKey(doc.id),
+                    child: _buildPostCard(
+                      post: post,
+                      docId: doc.id,
+                      context: context,
+                      topicKey: topicKey,
+                      isTopicDemoted: isTopicDemoted,
+                      isMatchedInterest: isMatchedInterest,
+                      missingAppliances: missingAppliances,
+                      allergies: allergies,
+                    ),
                   );
                 },
               ),
@@ -2062,15 +2136,23 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: Colors.blue.shade100,
-                      backgroundImage: userIconBytes != null
-                          ? MemoryImage(userIconBytes)
-                          : null,
-                      child: userIconBytes == null
-                          ? const Icon(Icons.person, color: Colors.blue)
-                          : null,
+                    GestureDetector(
+                      onTap: () => _openUserProfile(
+                        context,
+                        userId: targetLookupUid,
+                        userName: displayUserName,
+                        iconBase64: displayIconBase64,
+                      ),
+                      child: CircleAvatar(
+                        radius: 20,
+                        backgroundColor: Colors.blue.shade100,
+                        backgroundImage: userIconBytes != null
+                            ? MemoryImage(userIconBytes)
+                            : null,
+                        child: userIconBytes == null
+                            ? const Icon(Icons.person, color: Colors.blue)
+                            : null,
+                      ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -2079,11 +2161,19 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                         spacing: 6,
                         runSpacing: 4,
                         children: [
-                          Text(
-                            displayUserName,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
+                          GestureDetector(
+                            onTap: () => _openUserProfile(
+                              context,
+                              userId: targetLookupUid,
+                              userName: displayUserName,
+                              iconBase64: displayIconBase64,
+                            ),
+                            child: Text(
+                              displayUserName,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15,
+                              ),
                             ),
                           ),
                           if (post['mainCategory'] != null &&

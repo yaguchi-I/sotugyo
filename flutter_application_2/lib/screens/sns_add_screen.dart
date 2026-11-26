@@ -383,11 +383,7 @@ class _SnsAddScreenState extends State {
   }) async {
     final currentKey = AiChatScreen.apiKey.trim();
     if (currentKey.isEmpty || currentKey.contains('ここに')) {
-      return {
-        'verdict': 'SKIPPED',
-        'category': 'API未設定',
-        'reason': '',
-      };
+      return {'verdict': 'SKIPPED', 'category': 'API未設定', 'reason': ''};
     }
 
     final prompt =
@@ -443,11 +439,7 @@ class _SnsAddScreenState extends State {
       } catch (e) {}
     }
 
-    return {
-      'verdict': 'SKIPPED',
-      'category': '通信スキップ',
-      'reason': '',
-    };
+    return {'verdict': 'SKIPPED', 'category': '通信スキップ', 'reason': ''};
   }
 
   Future<void> _showBlockDialog({
@@ -816,7 +808,11 @@ class _SnsAddScreenState extends State {
       final bool savedRecipeMode = _isRecipeMode;
 
       if (moderationStatus == 'local_only') {
-        _runLayer3FallbackModeration(docRef.id, combinedCheckText, imageSnapshot);
+        _runLayer3FallbackModeration(
+          docRef.id,
+          combinedCheckText,
+          imageSnapshot,
+        );
       }
 
       AiKnowledgeService.enrichPostMetadataInBackground(
@@ -1279,7 +1275,8 @@ class _SnsAddScreenState extends State {
                                         Icons.remove_circle,
                                         color: Colors.redAccent,
                                       ),
-                                      onPressed: () => _removeIngredientRow(idx),
+                                      onPressed: () =>
+                                          _removeIngredientRow(idx),
                                     ),
                                   ],
                                 ),
@@ -1386,8 +1383,8 @@ class _SnsAddScreenState extends State {
                                   onSelected: _isUploading
                                       ? null
                                       : (_) => _toggleSuggestedHashtag(
-                                            rawTag.toString(),
-                                          ),
+                                          rawTag.toString(),
+                                        ),
                                 ),
                             ],
                           ),
