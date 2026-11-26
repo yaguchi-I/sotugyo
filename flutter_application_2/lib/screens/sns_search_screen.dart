@@ -33,9 +33,19 @@ class _SnsSearchScreenState extends State {
   String _selectedTag = 'すべて';
   String _selectedHashtag = '';
   bool _excludeAllergens = true;
+  bool _recipeOnly = false;
+  int? _maxRecipeCost;
 
   final List _tags = ['すべて', 'トレンド', '料理', '掃除', '収納', 'その他'];
+
+  final _costPresets = const [
+    {'label': '150円以下', 'max': 150},
+    {'label': '300円以下', 'max': 300},
+    {'label': '500円以下', 'max': 500},
+    {'label': '1000円以下', 'max': 1000},
+  ];
   final Map _servingsPerPost = {};
+
   final Map _postImageCache = {};
   final Map _userIconCache = {};
 
@@ -63,6 +73,26 @@ class _SnsSearchScreenState extends State {
   void dispose() {
     _searchController.dispose();
     super.dispose();
+  }
+
+  int? _extractCostYen(dynamic rawCost) {
+    if (rawCost == null) return null;
+    if (rawCost is num) {
+      final value = rawCost.toInt();
+      return value > 0 ? value : null;
+    }
+    final digitsOnly = rawCost.toString().replaceAll(RegExp(r'[^0-9]'), '');
+    if (digitsOnly.isEmpty) return null;
+    final parsed = int.tryParse(digitsOnly);
+    if (parsed == null || parsed <= 0) return null;
+    return parsed;
+  }
+
+  bool _matchesRecipeCostFilter(Map data) {
+    if (_maxRecipeCost == null) return true;
+    final cost = _extractCostYen(data['recipeCost']);
+    if (cost == null) return false;
+    return cost <= _maxRecipeCost!;
   }
 
   Uint8List? _decodeAndCache(String cacheKey, String? rawBase64, Map cacheMap) {
@@ -949,6 +979,8 @@ class _SnsSearchScreenState extends State {
           }
         }
 
+        final bool showRecipeCostFilter = _selectedTag == '料理' && _recipeOnly;
+
         return Scaffold(
           appBar: AppBar(
             leading: Navigator.of(context).canPop()
@@ -1019,8 +1051,15 @@ class _SnsSearchScreenState extends State {
                 }
                 final mainCategory = (data['mainCategory'] ?? '').toString();
                 final subCategory = (data['subCategory'] ?? '').toString();
-                return mainCategory == _selectedTag ||
-                    subCategory == _selectedTag;
+                final matchesCategory =
+                    mainCategory == _selectedTag || subCategory == _selectedTag;
+                if (!matchesCategory) return false;
+
+                if (_selectedTag == '料理' && _recipeOnly) {
+                  if (data['isRecipePost'] != true) return false;
+                  if (!_matchesRecipeCostFilter(data)) return false;
+                }
+                return true;
               }).toList();
 
               final Map hashtagCounts = {};
@@ -1208,8 +1247,56 @@ class _SnsSearchScreenState extends State {
                                     ),
                                     side: BorderSide.none,
                                     onSelected: (_) {
+                                      final nextTag = rawTag.toString();
                                       setState(() {
-                                        _selectedTag = rawTag.toString();
+                                        _selectedTag = nextTag;
+                                        if (nextTag != '料理') {
+                                          _recipeOnly = false;
+                                          _maxRecipeCost = null;
+                                        }
+                                      });
+                                    },
+                                  ),
+                                ),
+                              if (_selectedTag == '料理')
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 6.0),
+                                  child: FilterChip(
+                                    avatar: Icon(
+                                      Icons.restaurant_menu,
+                                      size: 14,
+                                      color: _recipeOnly
+                                          ? Colors.deepOrange.shade800
+                                          : Colors.grey,
+                                    ),
+                                    label: Text(
+                                      'レシピのみ',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: _recipeOnly
+                                            ? Colors.deepOrange.shade900
+                                            : Colors.black54,
+                                        fontWeight: _recipeOnly
+                                            ? FontWeight.bold
+                                            : FontWeight.normal,
+                                      ),
+                                    ),
+                                    selected: _recipeOnly,
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    selectedColor: Colors.orange.shade100,
+                                    backgroundColor: Colors.grey.shade100,
+                                    side: BorderSide(
+                                      color: _recipeOnly
+                                          ? Colors.deepOrange.shade300
+                                          : Colors.grey.shade300,
+                                    ),
+                                    onSelected: (val) {
+                                      setState(() {
+                                        _recipeOnly = val;
+                                        if (!val) {
+                                          _maxRecipeCost = null;
+                                        }
                                       });
                                     },
                                   ),
@@ -1254,6 +1341,89 @@ class _SnsSearchScreenState extends State {
                             ],
                           ),
                         ),
+                        if (showRecipeCostFilter) ...[
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 34,
+                            child: ListView(
+                              scrollDirection: Axis.horizontal,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 6.0),
+                                  child: ChoiceChip(
+                                    label: const Text(
+                                      '材料費指定なし',
+                                      style: TextStyle(fontSize: 11),
+                                    ),
+                                    selected: _maxRecipeCost == null,
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    selectedColor: Colors.green.shade600,
+                                    backgroundColor: Colors.grey.shade100,
+                                    labelStyle: TextStyle(
+                                      color: _maxRecipeCost == null
+                                          ? Colors.white
+                                          : Colors.black87,
+                                      fontWeight: _maxRecipeCost == null
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                    ),
+                                    side: BorderSide.none,
+                                    onSelected: (_) {
+                                      setState(() {
+                                        _maxRecipeCost = null;
+                                      });
+                                    },
+                                  ),
+                                ),
+                                for (final preset in _costPresets)
+                                  Builder(
+                                    builder: (_) {
+                                      final int maxYen = preset['max'] as int;
+                                      final String label =
+                                          preset['label'] as String;
+                                      final bool selected =
+                                          _maxRecipeCost == maxYen;
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 6.0,
+                                        ),
+                                        child: ChoiceChip(
+                                          label: Text(
+                                            label,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                          selected: selected,
+                                          showCheckmark: false,
+                                          visualDensity: VisualDensity.compact,
+                                          selectedColor: Colors.green.shade600,
+                                          backgroundColor: Colors.grey.shade100,
+                                          labelStyle: TextStyle(
+                                            color: selected
+                                                ? Colors.white
+                                                : Colors.black87,
+                                            fontWeight: selected
+                                                ? FontWeight.bold
+                                                : FontWeight.normal,
+                                          ),
+                                          side: BorderSide.none,
+                                          onSelected: (_) {
+                                            setState(() {
+                                              _maxRecipeCost = selected
+                                                  ? null
+                                                  : maxYen;
+                                            });
+                                          },
+                                        ),
+                                      );
+                                    },
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
                         if (topHashtags.isNotEmpty) ...[
                           const SizedBox(height: 8),
                           SingleChildScrollView(
@@ -1347,7 +1517,11 @@ class _SnsSearchScreenState extends State {
                                 ? '#$_selectedHashtag の投稿（${filteredDocs.length}件）'
                                 : (_selectedTag == 'トレンド'
                                       ? 'トレンドの投稿（${filteredDocs.length}件）'
-                                      : '検索結果（${filteredDocs.length}件）'),
+                                      : (_selectedTag == '料理' && _recipeOnly
+                                            ? (_maxRecipeCost != null
+                                                  ? '料理レシピ（${_maxRecipeCost}円以下・${filteredDocs.length}件）'
+                                                  : '料理レシピの投稿（${filteredDocs.length}件）')
+                                            : '検索結果（${filteredDocs.length}件）')),
                             style: const TextStyle(
                               fontSize: 15,
                               fontWeight: FontWeight.bold,
@@ -1356,7 +1530,9 @@ class _SnsSearchScreenState extends State {
                         ),
                         if (_selectedHashtag.isNotEmpty ||
                             _searchQuery.isNotEmpty ||
-                            _selectedTag != 'すべて')
+                            _selectedTag != 'すべて' ||
+                            _recipeOnly ||
+                            _maxRecipeCost != null)
                           TextButton(
                             onPressed: () {
                               _searchController.clear();
@@ -1364,6 +1540,8 @@ class _SnsSearchScreenState extends State {
                                 _searchQuery = '';
                                 _selectedTag = 'すべて';
                                 _selectedHashtag = '';
+                                _recipeOnly = false;
+                                _maxRecipeCost = null;
                               });
                             },
                             style: TextButton.styleFrom(

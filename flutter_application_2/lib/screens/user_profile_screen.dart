@@ -6,7 +6,9 @@ import 'dart:ui';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
 
+import 'ai_chat_screen.dart' show AiChatScreen;
 import 'sns_detail_screen.dart';
 import 'sns_reply_screen.dart';
 
@@ -43,17 +45,597 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   );
 
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
+  final String currentEmailPrefix =
+      (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
 
   _ProfilePostSortOrder _sortOrder = _ProfilePostSortOrder.likes;
   _ProfilePostFilter _postFilter = _ProfilePostFilter.all;
   bool _isTogglingFollow = false;
 
+  final Map<String, int> _servingsPerPost = {};
   final Map<String, Map<String, dynamic>> _postImageCache = {};
 
   bool get _canFollowTarget =>
       currentUserId.isNotEmpty &&
       widget.userId.isNotEmpty &&
       currentUserId != widget.userId;
+
+  String _getTopicKey(Map<String, dynamic> post) {
+    final mainCat = post['mainCategory']?.toString() ?? '指定なし';
+    final subCat = post['subCategory']?.toString() ?? '指定なし';
+    if (mainCat == '指定なし' || mainCat.isEmpty) return '';
+    if (subCat != '指定なし' && subCat.isNotEmpty) {
+      return '$mainCat:$subCat';
+    }
+    return mainCat;
+  }
+
+  Future<void> _deletePost(String docId) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('投稿の削除'),
+        content: const Text('この投稿を削除してもよろしいですか？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await FirebaseFirestore.instance.collection('posts').doc(docId).delete();
+      messenger.showSnackBar(const SnackBar(content: Text('投稿を削除しました')));
+    }
+  }
+
+  Future<void> _toggleTopicInterest(
+    String topicKey,
+    bool isCurrentlyDemoted,
+  ) async {
+    if (currentUserId.isEmpty || topicKey.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final userRef =
+        FirebaseFirestore.instance.collection('users').doc(currentUserId);
+
+    if (isCurrentlyDemoted) {
+      await userRef.set({
+        'lessInterestedTopics': FieldValue.arrayRemove([topicKey]),
+      }, SetOptions(merge: true));
+      messenger.showSnackBar(
+        SnackBar(content: Text('「$topicKey」の表示制限を解除しました')),
+      );
+    } else {
+      await userRef.set({
+        'lessInterestedTopics': FieldValue.arrayUnion([topicKey]),
+      }, SetOptions(merge: true));
+      messenger.showSnackBar(
+        SnackBar(content: Text('「$topicKey」の投稿を表示しにくくしました')),
+      );
+    }
+  }
+
+  Future<void> _hidePost(String docId) async {
+    if (currentUserId.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await FirebaseFirestore.instance.collection('posts').doc(docId).update({
+      'hiddenUsers': FieldValue.arrayUnion([currentUserId]),
+    });
+    messenger.showSnackBar(const SnackBar(content: Text('この投稿を非表示にしました')));
+  }
+
+  Future<void> _reportPost(String docId) async {
+    if (currentUserId.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await FirebaseFirestore.instance.collection('posts').doc(docId).update({
+      'reportedUsers': FieldValue.arrayUnion([currentUserId]),
+    });
+    messenger.showSnackBar(
+      const SnackBar(content: Text('投稿を通報しました。ご協力ありがとうございます。')),
+    );
+  }
+
+  Future<void> _blockUser(String targetKey, String displayName) async {
+    if (currentUserId.isEmpty || targetKey.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await FirebaseFirestore.instance.collection('users').doc(currentUserId).set(
+      {
+        'blockedUsers': FieldValue.arrayUnion([targetKey]),
+      },
+      SetOptions(merge: true),
+    );
+    messenger.showSnackBar(SnackBar(content: Text('$displayName さんをブロックしました')));
+  }
+
+  void _showPostOptions({
+    required String docId,
+    required bool isMyPost,
+    required String topicKey,
+    required bool isTopicDemoted,
+    required String targetUserKey,
+    required String displayUserName,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              if (isMyPost)
+                ListTile(
+                  leading: const Icon(Icons.delete_outline, color: Colors.red),
+                  title: const Text(
+                    'この投稿を削除する',
+                    style: TextStyle(color: Colors.red),
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _deletePost(docId);
+                  },
+                ),
+              if (!isMyPost) ...[
+                if (topicKey.isNotEmpty)
+                  ListTile(
+                    leading: Icon(
+                      isTopicDemoted
+                          ? Icons.visibility_outlined
+                          : Icons.thumb_down_outlined,
+                    ),
+                    title: Text(
+                      isTopicDemoted
+                          ? '「$topicKey」の表示制限を解除する'
+                          : 'この話題（$topicKey）の表示を減らす',
+                    ),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      _toggleTopicInterest(topicKey, isTopicDemoted);
+                    },
+                  ),
+                ListTile(
+                  leading: const Icon(Icons.visibility_off_outlined),
+                  title: const Text('この投稿を非表示にする'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _hidePost(docId);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(
+                    Icons.flag_outlined,
+                    color: Colors.orange,
+                  ),
+                  title: const Text('この投稿を通報する'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _reportPost(docId);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.block, color: Colors.red),
+                  title: Text(
+                    '$displayUserName さんをブロックする',
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _blockUser(targetUserKey, displayUserName);
+                  },
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  bool _isRecipePost(Map<String, dynamic> post) {
+    if (post['isRecipePost'] == true) return true;
+    final hasIngredients =
+        post['recipeIngredients'] is List &&
+        (post['recipeIngredients'] as List).isNotEmpty;
+    final hasSteps =
+        (post['recipeSteps']?.toString().trim().isNotEmpty ?? false);
+    final hasTime =
+        (post['recipeTime']?.toString().trim().isNotEmpty ?? false);
+    final hasCost =
+        (post['recipeCost']?.toString().trim().isNotEmpty ?? false);
+    return hasIngredients || hasSteps || hasTime || hasCost;
+  }
+
+  String _formatScaledNumber(double val) {
+    if ((val - val.round()).abs() < 0.05) {
+      return val.round().toString();
+    }
+    return val.toStringAsFixed(1);
+  }
+
+  String _scaleAmountString(
+    String rawAmount,
+    int baseServings,
+    int targetServings,
+  ) {
+    if (baseServings <= 0 || baseServings == targetServings) return rawAmount;
+    final double ratio = targetServings / baseServings;
+
+    final fractionRegex = RegExp(r'(\d+)\s*/\s*(\d+)');
+    if (fractionRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(fractionRegex, (match) {
+        final num = double.tryParse(match.group(1) ?? '1') ?? 1;
+        final den = double.tryParse(match.group(2) ?? '1') ?? 1;
+        if (den == 0) return match.group(0) ?? '';
+        final scaled = (num / den) * ratio;
+        return _formatScaledNumber(scaled);
+      });
+    }
+
+    final decimalRegex = RegExp(r'(\d+(?:\.\d+)?)');
+    if (decimalRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(decimalRegex, (match) {
+        final num = double.tryParse(match.group(1) ?? '0') ?? 0;
+        final scaled = num * ratio;
+        return _formatScaledNumber(scaled);
+      });
+    }
+
+    return '$rawAmount（×${_formatScaledNumber(ratio)}）';
+  }
+
+  Future<void> _askAiIngredientSubstitution({
+    required String dishTitle,
+    required String targetIngredient,
+    required List allIngredients,
+    required List missingAppliances,
+    required List allergies,
+  }) async {
+    final currentKey = AiChatScreen.apiKey.trim();
+    if (currentKey.isEmpty || currentKey.contains('ここに')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('AIチャット画面でAPIキーを設定してください')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text('AIが代用・アレンジ案を考えています...')),
+          ],
+        ),
+      ),
+    );
+
+    final ingNames = allIngredients
+        .where((e) => e is Map)
+        .map((e) => '${(e as Map)['name'] ?? ''} ${(e)['amount'] ?? ''}')
+        .join('、');
+    final missingText = missingAppliances.isEmpty
+        ? '特になし'
+        : missingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(allergies);
+
+    final prompt =
+        '料理「$dishTitle」（全体の材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
+        '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdownの記号（*や#）は使わないでください。';
+
+    String replyText = '代用案を取得できませんでした。もう一度お試しください。';
+
+    for (final modelName in AiChatScreen.fallbackModels) {
+      try {
+        final model = GenerativeModel(
+          model: modelName.toString(),
+          apiKey: currentKey,
+        );
+        final response = await model
+            .generateContent([Content.text(prompt)])
+            .timeout(const Duration(seconds: 20));
+        if (response.text != null && response.text!.trim().isNotEmpty) {
+          replyText = response.text!
+              .replaceAll('**', '')
+              .replaceAll('##', '')
+              .trim();
+          break;
+        }
+      } catch (_) {}
+    }
+
+    if (allergies.isNotEmpty &&
+        AiChatScreen.containsAllergen(replyText, allergies)) {
+      replyText =
+          'アレルギー対象食材（${allergies.join('・')}）に関連する表現が含まれたため表示を控えました。AI相談画面で使える手持ち食材を指定して聞いてみてください。';
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pop();
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.auto_awesome, color: Colors.orange),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '「$targetIngredient」の代用案',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text(
+            replyText,
+            style: const TextStyle(fontSize: 15, height: 1.5),
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecipeSection(
+    Map<String, dynamic> post,
+    String docId, {
+    required List missingAppliances,
+    required List allergies,
+  }) {
+    final String titleCandidate =
+        (post['title']?.toString().trim().isNotEmpty == true)
+            ? post['title'].toString().trim()
+            : (post['recipeTitle']?.toString().trim() ?? '');
+    final String recipeTitle =
+        titleCandidate.isNotEmpty ? titleCandidate : '手作りレシピ';
+
+    final int baseServings = max(
+      1,
+      int.tryParse(
+            (post['recipeServings'] ?? post['baseServings'] ?? '1').toString(),
+          ) ??
+          1,
+    );
+    final int currentServings = _servingsPerPost[docId] ?? baseServings;
+
+    final String rawCostText = post['recipeCost'] is int
+        ? ((post['recipeCost'] as int) > 0 ? '${post['recipeCost']}' : '')
+        : (post['recipeCost']?.toString().trim() ?? '');
+    final String scaledCostText = rawCostText.isNotEmpty
+        ? _scaleAmountString(rawCostText, baseServings, currentServings)
+        : '';
+
+    final String recipeTime = post['recipeTime']?.toString().trim() ?? '';
+    final List ingredients = post['recipeIngredients'] is List
+        ? List.from(post['recipeIngredients'])
+        : const [];
+    final String steps = post['recipeSteps']?.toString().trim() ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10.0),
+      padding: const EdgeInsets.all(14.0),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.restaurant, color: Colors.deepOrange, size: 20),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  recipeTitle,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (recipeTime.isNotEmpty || scaledCostText.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 6,
+              children: [
+                if (recipeTime.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.schedule,
+                          size: 14,
+                          color: Colors.grey.shade700,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          recipeTime,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (scaledCostText.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '$scaledCostText（$currentServings人分）',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          if (ingredients.isNotEmpty) ...[
+            const Divider(height: 18),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '材料（$currentServings人分）',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.remove, size: 15),
+                        constraints: const BoxConstraints(),
+                        padding: const EdgeInsets.all(5),
+                        onPressed: currentServings > 1
+                            ? () {
+                                setState(() {
+                                  _servingsPerPost[docId] =
+                                      currentServings - 1;
+                                });
+                              }
+                            : null,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6.0),
+                        child: Text(
+                          '$currentServings人分',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add, size: 15),
+                        constraints: const BoxConstraints(),
+                        padding: const EdgeInsets.all(5),
+                        onPressed: currentServings < 6
+                            ? () {
+                                setState(() {
+                                  _servingsPerPost[docId] =
+                                      currentServings + 1;
+                                });
+                              }
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            for (final item in ingredients)
+              if (item is Map)
+                Builder(
+                  builder: (_) {
+                    final ingName = item['name']?.toString() ?? '';
+                    final ingAmount = _scaleAmountString(
+                      item['amount']?.toString() ?? '',
+                      baseServings,
+                      currentServings,
+                    );
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '・$ingName : $ingAmount',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => _askAiIngredientSubstitution(
+                              dishTitle: recipeTitle,
+                              targetIngredient: ingName,
+                              allIngredients: ingredients,
+                              missingAppliances: missingAppliances,
+                              allergies: allergies,
+                            ),
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: const Text(
+                              'AI代用案',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+          ],
+          if (steps.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            const Text(
+              '作り方',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            Text(steps, style: const TextStyle(fontSize: 13, height: 1.45)),
+          ],
+        ],
+      ),
+    );
+  }
 
   List<String> _extractHashtagsFromText(String text) {
     final List<String> result = [];
@@ -589,6 +1171,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               : null,
           builder: (context, meSnap) {
             final Set<String> myFollowingSet = {};
+            List lessInterestedTopics = const [];
+            List blockedUsers = const [];
+            List missingAppliances = const [];
+            List allergies = const [];
+
             if (meSnap.hasData &&
                 meSnap.data != null &&
                 meSnap.data!.exists &&
@@ -596,6 +1183,21 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               final meData = meSnap.data!.data() as Map<String, dynamic>;
               myFollowingSet.addAll(_readStringList(meData, 'followingUsers'));
               myFollowingSet.addAll(_readStringList(meData, 'following'));
+              if (meData['lessInterestedTopics'] is List) {
+                lessInterestedTopics = List.from(meData['lessInterestedTopics']);
+              }
+              if (meData['blockedUsers'] is List) {
+                blockedUsers = List.from(meData['blockedUsers']);
+              }
+              if (meData['missingAppliances'] is List) {
+                missingAppliances = List.from(meData['missingAppliances']);
+              }
+              if (meData['allergies'] is List) {
+                allergies = List.from(meData['allergies'])
+                    .map((e) => e.toString().trim())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+              }
             }
             final bool isFollowingTarget =
                 widget.userId.isNotEmpty && myFollowingSet.contains(widget.userId);
@@ -630,6 +1232,33 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   final allUserPosts = allDocs.where((doc) {
                     final data = doc.data();
                     if (data['mainCategory'] == 'AI') return false;
+
+                    final List hiddenUsers = data['hiddenUsers'] is List
+                        ? List.from(data['hiddenUsers'])
+                        : const [];
+                    if (currentUserId.isNotEmpty &&
+                        hiddenUsers.contains(currentUserId)) {
+                      return false;
+                    }
+
+                    final List reportedUsers = data['reportedUsers'] is List
+                        ? List.from(data['reportedUsers'])
+                        : const [];
+                    if (reportedUsers.length >= 3 ||
+                        (currentUserId.isNotEmpty &&
+                            reportedUsers.contains(currentUserId))) {
+                      return false;
+                    }
+
+                    final postUid = data['userId']?.toString() ?? '';
+                    final postUName = data['userName']?.toString() ?? '';
+                    if ((postUid.isNotEmpty &&
+                            blockedUsers.contains(postUid)) ||
+                        (postUName.isNotEmpty &&
+                            blockedUsers.contains(postUName))) {
+                      return false;
+                    }
+
                     return _belongsToTargetUser(data);
                   }).toList();
 
@@ -1044,6 +1673,25 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 (context, index) {
                                   final doc = userPosts[index];
                                   final post = doc.data();
+                                  final bool isRecipe = _isRecipePost(post);
+                                  final topicKey = _getTopicKey(post);
+                                  final bool isTopicDemoted =
+                                      topicKey.isNotEmpty &&
+                                      lessInterestedTopics.contains(topicKey);
+                                  final postUserId =
+                                      post['userId']?.toString() ?? '';
+                                  final rawPostUserName =
+                                      post['userName']?.toString() ?? '名無し';
+                                  final bool isMyPost =
+                                      (postUserId.isNotEmpty &&
+                                          postUserId == currentUserId) ||
+                                      (currentEmailPrefix.isNotEmpty &&
+                                          rawPostUserName == currentEmailPrefix);
+                                  final String targetUserKey =
+                                      postUserId.isNotEmpty
+                                          ? postUserId
+                                          : rawPostUserName;
+
                                   final mainCategory =
                                       post['mainCategory']?.toString().trim() ??
                                       '';
@@ -1255,9 +1903,36 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                                             ),
                                                           ),
                                                         ],
+                                                        const SizedBox(
+                                                          width: 4,
+                                                        ),
+                                                        IconButton(
+                                                          icon: const Icon(
+                                                            Icons.more_vert,
+                                                            size: 18,
+                                                            color: Colors.grey,
+                                                          ),
+                                                          constraints:
+                                                              const BoxConstraints(),
+                                                          padding:
+                                                              EdgeInsets.zero,
+                                                          onPressed: () =>
+                                                              _showPostOptions(
+                                                            docId: doc.id,
+                                                            isMyPost: isMyPost,
+                                                            topicKey: topicKey,
+                                                            isTopicDemoted:
+                                                                isTopicDemoted,
+                                                            targetUserKey:
+                                                                targetUserKey,
+                                                            displayUserName:
+                                                                displayName,
+                                                          ),
+                                                        ),
                                                       ],
                                                     ),
-                                                    if (title.isNotEmpty)
+                                                    if (!isRecipe &&
+                                                        title.isNotEmpty)
                                                       Padding(
                                                         padding:
                                                             const EdgeInsets
@@ -1285,6 +1960,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                                             _buildHighlightedContent(
                                                           content,
                                                         ),
+                                                      ),
+                                                    if (isRecipe)
+                                                      _buildRecipeSection(
+                                                        post,
+                                                        doc.id,
+                                                        missingAppliances:
+                                                            missingAppliances,
+                                                        allergies: allergies,
                                                       ),
                                                     if (postHashtags.isNotEmpty)
                                                       Padding(
