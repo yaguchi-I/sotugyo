@@ -16,6 +16,8 @@ import 'screens/sns_search_screen.dart' show SnsSearchScreen;
 import 'screens/sns_bookmark_screen.dart' show SnsBookmarkScreen;
 import 'screens/cooking_screen.dart' show CookingScreen;
 import 'screens/onboarding_screen.dart' show OnboardingScreen;
+import 'screens/user_profile_screen.dart' show UserProfileScreen;
+import 'screens/account_settings_screen.dart' show AccountSettingsScreen;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -247,7 +249,8 @@ class _MainScreenState extends State<MainScreen> {
             ? userData['userName'].toString()
             : (currentUser?.displayName ?? 'マイページ');
         final email = currentUser?.email ?? '';
-        final iconBytes = _decodeIcon(userData['iconBase64']?.toString());
+        final String iconBase64 = userData['iconBase64']?.toString() ?? '';
+        final iconBytes = _decodeIcon(iconBase64);
 
         return PopScope(
           canPop: _currentIndex == _home,
@@ -258,6 +261,7 @@ class _MainScreenState extends State<MainScreen> {
             drawer: _buildDrawer(
               userName: userName,
               email: email,
+              iconBase64: iconBase64,
               iconBytes: iconBytes,
               userData: userData,
             ),
@@ -345,6 +349,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildDrawer({
     required String userName,
     required String email,
+    required String iconBase64,
     required Uint8List? iconBytes,
     required Map userData,
   }) {
@@ -435,11 +440,59 @@ class _MainScreenState extends State<MainScreen> {
             _drawerPageTile(_home),
             _drawerPageTile(_search),
             _drawerPageTile(_bookmark),
+            ListTile(
+              leading: const Icon(Icons.person_outline),
+              title: const Text('マイページ'),
+              subtitle: const Text(
+                '自分の投稿・フォロー・プロフィールを見る',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => UserProfileScreen(
+                      userId: _uid,
+                      userName: userName,
+                      initialIconBase64: iconBase64,
+                    ),
+                  ),
+                );
+              },
+            ),
             _drawerSectionTitle('じぶんの暮らし'),
             _drawerPageTile(_budget),
             _drawerPageTile(_ai),
             _drawerPageTile(_cooking),
             const Divider(),
+            ListTile(
+              leading: const Icon(Icons.manage_accounts_outlined),
+              title: const Text('アカウント設定'),
+              subtitle: const Text(
+                'メール・パスワード変更・ブロック・退会',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (settingsCtx) => AccountSettingsScreen(
+                      onOpenProfileEdit: () {
+                        Navigator.push(
+                          settingsCtx,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                AccountEditScreen(initialUserData: userData),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                );
+              },
+            ),
             ListTile(
               leading: Icon(
                 Icons.settings_outlined,
