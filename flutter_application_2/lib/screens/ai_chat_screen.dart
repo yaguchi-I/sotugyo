@@ -16,8 +16,7 @@ class AiChatScreen extends StatefulWidget {
 
   const AiChatScreen({super.key, this.initialPrompt, this.referencedPost});
 
-  static const String apiKey =
-      '';
+  static const String apiKey = '';
 
   static const List fallbackModels = [
     'gemini-3.5-flash-lite',
@@ -1728,6 +1727,12 @@ class _AiChatScreenState extends State {
           break;
         }
       } catch (e) {}
+    }
+
+    if (_allergies.isNotEmpty &&
+        AiChatScreen.containsAllergen(replyText, _allergies)) {
+      replyText =
+          'アレルギー対象食材（${_allergies.join('・')}）に関連する表現が含まれたため表示を控えました。使える手持ち食材を指定してもう一度聞いてみてください。';
     }
 
     if (!mounted) return;
