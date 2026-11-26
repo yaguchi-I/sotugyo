@@ -41,119 +41,6 @@ class _SnsDetailScreenState extends State<SnsDetailScreen> {
   final Map _imageCache = {};
   final Map _iconCache = {};
 
-  late final Stream<DocumentSnapshot> _postStream;
-  late final Stream<QuerySnapshot> _repliesStream;
-  late final Stream<DocumentSnapshot>? _myUserStream;
-
-  @override
-  void initState() {
-    super.initState();
-    _postStream = FirebaseFirestore.instance
-        .collection('posts')
-        .doc(_postId)
-        .snapshots();
-    _repliesStream = FirebaseFirestore.instance
-        .collection('posts')
-        .doc(_postId)
-        .collection('replies')
-        .orderBy('createdAt', descending: false)
-        .snapshots();
-    _myUserStream = currentUserId.isNotEmpty
-        ? FirebaseFirestore.instance
-              .collection('users')
-              .doc(currentUserId)
-              .snapshots()
-        : null;
-  }
-
-  List _extractHashtagsFromText(String text) {
-    final List result = [];
-    if (text.trim().isEmpty) return result;
-    for (final match in _hashtagRegex.allMatches(text)) {
-      final tag = (match.group(1) ?? '').trim();
-      if (tag.isNotEmpty && !result.contains(tag)) {
-        result.add(tag);
-      }
-    }
-    return result;
-  }
-
-  List _extractHashtagsFromPost(Map post) {
-    final List result = [];
-    if (post['hashtags'] is List) {
-      for (final raw in List.from(post['hashtags'])) {
-        final cleaned = raw
-            .toString()
-            .trim()
-            .replaceFirst(RegExp(r'^[#＃]+'), '')
-            .trim();
-        if (cleaned.isNotEmpty && !result.contains(cleaned)) {
-          result.add(cleaned);
-        }
-      }
-    }
-    final titleTags = _extractHashtagsFromText(
-      (post['title'] ?? '').toString(),
-    );
-    final contentTags = _extractHashtagsFromText(
-      (post['content'] ?? '').toString(),
-    );
-    for (final t in [...titleTags, ...contentTags]) {
-      final str = t.toString();
-      if (!result.contains(str)) {
-        result.add(str);
-      }
-    }
-    return result;
-  }
-
-  Widget _buildHighlightedContent(String content) {
-    final List<TextSpan> spans = [];
-    int lastEnd = 0;
-
-    for (final match in _hashtagRegex.allMatches(content)) {
-      if (match.start > lastEnd) {
-        spans.add(
-          TextSpan(
-            text: content.substring(lastEnd, match.start),
-            style: const TextStyle(
-              fontSize: 15,
-              height: 1.5,
-              color: Colors.black87,
-            ),
-          ),
-        );
-      }
-      spans.add(
-        TextSpan(
-          text: content.substring(match.start, match.end),
-          style: TextStyle(
-            fontSize: 15,
-            height: 1.5,
-            color: Colors.blue.shade700,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
-      lastEnd = match.end;
-    }
-
-    if (lastEnd < content.length) {
-      spans.add(
-        TextSpan(
-          text: content.substring(lastEnd),
-          style: const TextStyle(
-            fontSize: 15,
-            height: 1.5,
-            color: Colors.black87,
-          ),
-        ),
-      );
-    }
-
-    return Text.rich(TextSpan(children: spans));
-  }
-
   void _openUserProfile(
     BuildContext context, {
     required String userId,
@@ -1081,15 +968,51 @@ class _SnsDetailScreenState extends State<SnsDetailScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Row(
-                                    children: [
-                                      GestureDetector(
-                                        behavior: HitTestBehavior.opaque,
-                                        onTap: () => _openUserProfile(
-                                          context,
-                                          userId: targetLookupUid,
-                                          userName: displayUserName,
-                                          iconBase64: displayIconBase64,
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => _openUserProfile(
+                                      context,
+                                      userId: targetLookupUid,
+                                      userName: displayUserName,
+                                      iconBase64: displayIconBase64,
+                                    ),
+                                    child: CircleAvatar(
+                                      radius: 22,
+                                      backgroundColor: Colors.blue.shade100,
+                                      backgroundImage: userIconBytes != null
+                                          ? MemoryImage(userIconBytes)
+                                          : null,
+                                      child: userIconBytes == null
+                                          ? const Icon(
+                                              Icons.person,
+                                              color: Colors.blue,
+                                            )
+                                          : null,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Wrap(
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      spacing: 6,
+                                      runSpacing: 4,
+                                      children: [
+                                        GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () => _openUserProfile(
+                                            context,
+                                            userId: targetLookupUid,
+                                            userName: displayUserName,
+                                            iconBase64: displayIconBase64,
+                                          ),
+                                          child: Text(
+                                            displayUserName,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
                                         ),
                                         child: CircleAvatar(
                                           radius: 22,

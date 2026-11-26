@@ -170,43 +170,6 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
     }
   }
 
-  int _extractCreatedAtMillis(QueryDocumentSnapshot doc) {
-    final data = doc.data() as Map;
-    final raw = data['createdAt'];
-    if (raw is Timestamp) {
-      return raw.millisecondsSinceEpoch;
-    }
-    if (raw is DateTime) {
-      return raw.millisecondsSinceEpoch;
-    }
-    if (raw is int) {
-      return raw;
-    }
-    if (raw is String) {
-      final parsed = DateTime.tryParse(raw);
-      if (parsed != null) return parsed.millisecondsSinceEpoch;
-    }
-    if (doc.metadata.hasPendingWrites) {
-      return DateTime.now().millisecondsSinceEpoch;
-    }
-    return 0;
-  }
-
-  List _sortByNewest(List docs) {
-    final List sorted = List.from(docs);
-    sorted.sort((a, b) {
-      final docA = a as QueryDocumentSnapshot;
-      final docB = b as QueryDocumentSnapshot;
-      final timeA = _extractCreatedAtMillis(docA);
-      final timeB = _extractCreatedAtMillis(docB);
-      if (timeB != timeA) {
-        return timeB.compareTo(timeA);
-      }
-      return docB.id.compareTo(docA.id);
-    });
-    return sorted;
-  }
-
   void _openUserProfile(
     BuildContext context, {
     required String userId,
@@ -1466,13 +1429,11 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       );
     }
 
-    final filtered = _sortByNewest(
-      docs.where((d) {
-        final post = (d as QueryDocumentSnapshot).data() as Map;
-        final uid = post['userId']?.toString().trim() ?? '';
-        return uid.isNotEmpty && followingUsers.contains(uid);
-      }).toList(),
-    );
+    final filtered = docs.where((d) {
+      final post = (d as QueryDocumentSnapshot).data() as Map;
+      final uid = post['userId']?.toString().trim() ?? '';
+      return uid.isNotEmpty && followingUsers.contains(uid);
+    }).toList();
 
     if (filtered.isEmpty) {
       return _buildFollowingEmpty(
