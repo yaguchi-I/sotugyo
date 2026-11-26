@@ -6,8 +6,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import 'ai_chat_screen.dart';
-import 'sns_detail_screen.dart';
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_detail_screen.dart' show SnsDetailScreen;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsBookmarkScreen extends StatefulWidget {
   const SnsBookmarkScreen({super.key});
@@ -134,17 +135,12 @@ class _SnsBookmarkScreenState extends State
 
   Future _toggleSave(String docId) async {
     if (currentUserId.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
     try {
       await FirebaseFirestore.instance.collection('posts').doc(docId).update({
         'savedUsers': FieldValue.arrayRemove([currentUserId]),
       });
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('保存フォルダから解除しました'),
-          duration: Duration(seconds: 2),
-        ),
-      );
+      if (!mounted) return;
+      showReactionToast(context, 'savedUsers', added: false);
     } catch (e) {}
   }
 
@@ -898,7 +894,11 @@ class AiRecipeDetailScreen extends StatefulWidget {
   State createState() => _AiRecipeDetailScreenState();
 }
 
-class _AiRecipeDetailScreenState extends State<AiRecipeDetailScreen> {
+class _AiRecipeDetailScreenState extends State {
+  String get _postId => (widget as AiRecipeDetailScreen).postId;
+  List get _missingAppliances =>
+      (widget as AiRecipeDetailScreen).missingAppliances;
+
   int _currentServings = 1;
   bool _initializedServings = false;
 
@@ -971,9 +971,9 @@ class _AiRecipeDetailScreenState extends State<AiRecipeDetailScreen> {
         })
         .join('、');
 
-    final missingText = widget.missingAppliances.isEmpty
+    final missingText = _missingAppliances.isEmpty
         ? '特になし'
-        : widget.missingAppliances.join('、');
+        : _missingAppliances.join('、');
 
     final prompt = targetIngredient != null
         ? '料理「$dishTitle」（材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
@@ -1053,7 +1053,7 @@ class _AiRecipeDetailScreenState extends State<AiRecipeDetailScreen> {
       body: FutureBuilder(
         future: FirebaseFirestore.instance
             .collection('posts')
-            .doc(widget.postId)
+            .doc(_postId)
             .get(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {

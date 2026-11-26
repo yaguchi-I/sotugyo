@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -6,9 +7,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import 'ai_chat_screen.dart';
-import 'sns_reply_screen.dart';
-import 'sns_screen.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_reply_screen.dart' show SnsReplyScreen;
+import 'sns_screen.dart' show PostImageCarousel;
+import 'user_profile_screen.dart' show UserProfileScreen;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class SnsDetailScreen extends StatefulWidget {
   final String postId;
@@ -23,21 +27,62 @@ class _SnsDetailScreenState extends State {
   String get _postId => (widget as SnsDetailScreen).postId;
 
   final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
-  final String currentUserEmail =
-      FirebaseAuth.instance.currentUser?.email ?? '';
   final String currentEmailPrefix =
       (FirebaseAuth.instance.currentUser?.email ?? '').split('@').first;
 
-  static const List _developerEmails = ['meisseikao62@gmail.com'];
-
-  bool _manualDevMode = false;
-
-  bool get _isDeveloper =>
-      _manualDevMode || _developerEmails.contains(currentUserEmail);
+  bool _isDeveloper = true;
+  bool _hasRecordedImpression = false;
 
   int? _customServings;
   final Map _imageCache = {};
   final Map _iconCache = {};
+
+  void _openUserProfile(
+    BuildContext context, {
+    required String userId,
+    required String userName,
+    required String iconBase64,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => UserProfileScreen(
+          userId: userId,
+          userName: userName,
+          initialIconBase64: iconBase64,
+        ),
+      ),
+    );
+  }
+
+  void _recordDetailImpressionOnce({
+    required int likes,
+    required int helpfuls,
+    required int saves,
+    required int replies,
+    required int currentImpressions,
+  }) {
+    if (_hasRecordedImpression || _postId.isEmpty) return;
+    _hasRecordedImpression = true;
+
+    final nextImpressions = currentImpressions + 1;
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: likes,
+      helpfuls: helpfuls,
+      saves: saves,
+      replies: replies,
+      impressions: nextImpressions,
+    );
+
+    FirebaseFirestore.instance
+        .collection('posts')
+        .doc(_postId)
+        .update({
+          'impressions': FieldValue.increment(1),
+          'valueScore': nextScore,
+        })
+        .catchError((_) {});
+  }
 
   Uint8List? _decodeAndCache(String cacheKey, String? rawBase64, Map cacheMap) {
     if (rawBase64 == null || rawBase64.trim().isEmpty) return null;
@@ -90,14 +135,9 @@ class _SnsDetailScreenState extends State {
   }
 
   int _readReactionCount(dynamic rawCount, List fallbackList) {
-    if (rawCount is int) {
-      return rawCount < 0 ? 0 : rawCount;
-    }
-    if (rawCount != null) {
-      final parsed = int.tryParse(rawCount.toString());
-      if (parsed != null) {
-        return parsed < 0 ? 0 : parsed;
-      }
+    final parsed = AiKnowledgeService.readIntField(rawCount, -1);
+    if (rawCount != null && parsed >= 0) {
+      return max(parsed, fallbackList.length);
     }
     return fallbackList.length;
   }
@@ -168,7 +208,8 @@ class _SnsDetailScreenState extends State {
     );
 
     final ingNames = allIngredients
-        .map((e) => '${(e as Map)['name'] ?? ''} ${(e)['amount'] ?? ''}')
+        .where((e) => e is Map)
+        .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}')
         .join('、');
 
     final prompt =
@@ -233,43 +274,167 @@ class _SnsDetailScreenState extends State {
     );
   }
 
-  Future _toggleReaction(
-    String listField,
-    String countField,
-    List currentUsers,
-    int currentDisplayCount,
-  ) async {
+  Future _sendReactionNotification({
+    required String targetUserId,
+    required String postSummary,
+    required String type,
+  }) async {
+    if (currentUserId.isEmpty ||
+        targetUserId.isEmpty ||
+        targetUserId == currentUserId) {
+      return;
+    }
+
+    try {
+      String fromName = FirebaseAuth.instance.currentUser?.displayName ?? '';
+      String fromIcon = '';
+      final uDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUserId)
+          .get();
+      if (uDoc.exists && uDoc.data() != null) {
+        final uData = uDoc.data()!;
+        if (uData['userName'] != null &&
+            uData['userName'].toString().trim().isNotEmpty) {
+          fromName = uData['userName'].toString().trim();
+        }
+        if (uData['iconBase64'] != null) {
+          fromIcon = uData['iconBase64'].toString();
+        }
+      }
+      if (fromName.isEmpty) {
+        fromName = currentEmailPrefix.isNotEmpty ? currentEmailPrefix : 'ユーザー';
+      }
+
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'targetUserId': targetUserId,
+        'fromUserId': currentUserId,
+        'fromUserName': fromName,
+        'fromUserIconBase64': fromIcon,
+        'postId': _postId,
+        'postSummary': postSummary,
+        'type': type,
+        'isRead': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {}
+  }
+
+  Future _toggleReaction({
+    required String listField,
+    required String countField,
+    required List currentUsers,
+    required int likesCount,
+    required int helpfulsCount,
+    required int savesCount,
+    required int repliesCount,
+    required int impressionsCount,
+    required String postOwnerUid,
+    required String postSummary,
+  }) async {
     if (currentUserId.isEmpty) return;
     final docRef = FirebaseFirestore.instance.collection('posts').doc(_postId);
     final isAdded = currentUsers.contains(currentUserId);
 
+    showReactionToast(context, listField, added: !isAdded);
+
+    int nextLikes = likesCount;
+    int nextHelpfuls = helpfulsCount;
+    int nextSaves = savesCount;
+
+    if (countField == 'likes') {
+      nextLikes = isAdded ? max(0, likesCount - 1) : likesCount + 1;
+    } else if (countField == 'helpfuls') {
+      nextHelpfuls = isAdded ? max(0, helpfulsCount - 1) : helpfulsCount + 1;
+    } else if (countField == 'saves') {
+      nextSaves = isAdded ? max(0, savesCount - 1) : savesCount + 1;
+    }
+
+    final nextScore = AiKnowledgeService.calculateValueScore(
+      likes: nextLikes,
+      helpfuls: nextHelpfuls,
+      saves: nextSaves,
+      replies: repliesCount,
+      impressions: impressionsCount,
+    );
+
+    final int nextTargetCount = countField == 'likes'
+        ? nextLikes
+        : (countField == 'helpfuls' ? nextHelpfuls : nextSaves);
+
     try {
-      if (isAdded) {
-        final nextCount = currentDisplayCount > 0 ? currentDisplayCount - 1 : 0;
-        await docRef.update({
-          listField: FieldValue.arrayRemove([currentUserId]),
-          countField: nextCount,
-        });
-      } else {
-        final nextCount = currentDisplayCount + 1;
-        await docRef.update({
-          listField: FieldValue.arrayUnion([currentUserId]),
-          countField: nextCount,
-        });
+      await docRef.update({
+        listField: isAdded
+            ? FieldValue.arrayRemove([currentUserId])
+            : FieldValue.arrayUnion([currentUserId]),
+        countField: nextTargetCount,
+        'valueScore': nextScore,
+      });
+
+      if (!isAdded && (countField == 'likes' || countField == 'helpfuls')) {
+        _sendReactionNotification(
+          targetUserId: postOwnerUid,
+          postSummary: postSummary,
+          type: countField == 'likes' ? 'like' : 'helpful',
+        );
       }
     } catch (e) {}
+  }
+
+  void _openPostInAiChat(Map post, String displayUserName) {
+    final title = (post['title'] ?? '').toString();
+    final content = (post['content'] ?? '').toString();
+    final preview = title.isNotEmpty ? title : content;
+    final shortPreview = preview.length > 36
+        ? '${preview.substring(0, 36)}...'
+        : preview;
+
+    final Map lightweightContext = {
+      'docId': _postId,
+      'userName': displayUserName,
+      'mainCategory': (post['mainCategory'] ?? '').toString(),
+      'subCategory': (post['subCategory'] ?? '').toString(),
+      'title': title,
+      'content': content,
+      'recipeCost': (post['recipeCost'] ?? '').toString(),
+      'recipeIngredients': post['recipeIngredients'] is List
+          ? List.from(post['recipeIngredients'])
+          : const [],
+      'recipeSteps': (post['recipeSteps'] ?? '').toString(),
+      'helpfuls': AiKnowledgeService.readIntField(post['helpfuls']),
+      'saves': AiKnowledgeService.readIntField(post['saves']),
+      'likes': AiKnowledgeService.readIntField(post['likes']),
+      'priceTier': (post['priceTier'] ?? 'none').toString(),
+    };
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AiChatScreen(
+          initialPrompt:
+              'タイムラインの「$shortPreview」という投稿が気になっています。私の家電状況や一人暮らし向けにアレンジ・実践するコツを教えて！',
+          referencedPost: lightweightContext,
+        ),
+      ),
+    );
   }
 
   Future _showDeveloperEditCountsDialog({
     required int currentLikes,
     required int currentHelpfuls,
+    required int currentSaves,
     required int currentReplies,
+    required int currentImpressions,
   }) async {
     final likesCtrl = TextEditingController(text: currentLikes.toString());
     final helpfulsCtrl = TextEditingController(
       text: currentHelpfuls.toString(),
     );
+    final savesCtrl = TextEditingController(text: currentSaves.toString());
     final repliesCtrl = TextEditingController(text: currentReplies.toString());
+    final impressionsCtrl = TextEditingController(
+      text: currentImpressions.toString(),
+    );
     final messenger = ScaffoldMessenger.of(context);
 
     final saved = await showDialog(
@@ -282,7 +447,7 @@ class _SnsDetailScreenState extends State {
               SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '開発者専用：数値の変更',
+                  '開発者専用：数値・スコア変更',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                 ),
               ),
@@ -291,7 +456,13 @@ class _SnsDetailScreenState extends State {
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(
+                  '対象投稿ID: $_postId',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: likesCtrl,
                   keyboardType: TextInputType.number,
@@ -300,21 +471,39 @@ class _SnsDetailScreenState extends State {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 TextField(
                   controller: helpfulsCtrl,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
-                    labelText: '💡 役立った・電球数 (helpfuls)',
+                    labelText: '💡 参考になった数 (helpfuls)',
                     border: OutlineInputBorder(),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: savesCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '🔖 保存数 (saves)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 TextField(
                   controller: repliesCtrl,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
                     labelText: '💬 返信数 (replies)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: impressionsCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '👁️ インプレッション数 (impressions)',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -332,7 +521,7 @@ class _SnsDetailScreenState extends State {
                 backgroundColor: Colors.deepPurple,
                 foregroundColor: Colors.white,
               ),
-              child: const Text('保存する'),
+              child: const Text('保存してスコア再計算'),
             ),
           ],
         );
@@ -340,22 +529,50 @@ class _SnsDetailScreenState extends State {
     );
 
     if (saved == true) {
-      final newLikes = int.tryParse(likesCtrl.text.trim()) ?? currentLikes;
-      final newHelpfuls =
-          int.tryParse(helpfulsCtrl.text.trim()) ?? currentHelpfuls;
-      final newReplies =
-          int.tryParse(repliesCtrl.text.trim()) ?? currentReplies;
+      final newLikes = max(
+        0,
+        int.tryParse(likesCtrl.text.trim()) ?? currentLikes,
+      );
+      final newHelpfuls = max(
+        0,
+        int.tryParse(helpfulsCtrl.text.trim()) ?? currentHelpfuls,
+      );
+      final newSaves = max(
+        0,
+        int.tryParse(savesCtrl.text.trim()) ?? currentSaves,
+      );
+      final newReplies = max(
+        0,
+        int.tryParse(repliesCtrl.text.trim()) ?? currentReplies,
+      );
+      final newImpressions = max(
+        0,
+        int.tryParse(impressionsCtrl.text.trim()) ?? currentImpressions,
+      );
+
+      final newValueScore = AiKnowledgeService.calculateValueScore(
+        likes: newLikes,
+        helpfuls: newHelpfuls,
+        saves: newSaves,
+        replies: newReplies,
+        impressions: newImpressions,
+      );
 
       try {
         await FirebaseFirestore.instance
             .collection('posts')
             .doc(_postId)
             .update({
-              'likes': newLikes < 0 ? 0 : newLikes,
-              'helpfuls': newHelpfuls < 0 ? 0 : newHelpfuls,
-              'replies': newReplies < 0 ? 0 : newReplies,
+              'likes': newLikes,
+              'helpfuls': newHelpfuls,
+              'saves': newSaves,
+              'replies': newReplies,
+              'impressions': newImpressions,
+              'valueScore': newValueScore,
             });
-        messenger.showSnackBar(const SnackBar(content: Text('🛠️ 数値を更新しました！')));
+        messenger.showSnackBar(
+          SnackBar(content: Text('🛠️ 更新完了！ valueScore: $newValueScore')),
+        );
       } catch (e) {
         messenger.showSnackBar(SnackBar(content: Text('更新に失敗しました: $e')));
       }
@@ -418,26 +635,44 @@ class _SnsDetailScreenState extends State {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: Colors.blue.shade100,
-                backgroundImage: iconBytes != null
-                    ? MemoryImage(iconBytes)
-                    : null,
-                child: iconBytes == null
-                    ? const Icon(Icons.person, size: 20, color: Colors.blue)
-                    : null,
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _openUserProfile(
+                  context,
+                  userId: targetLookupUid,
+                  userName: displayName,
+                  iconBase64: displayIconBase64,
+                ),
+                child: CircleAvatar(
+                  radius: 18,
+                  backgroundColor: Colors.blue.shade100,
+                  backgroundImage: iconBytes != null
+                      ? MemoryImage(iconBytes)
+                      : null,
+                  child: iconBytes == null
+                      ? const Icon(Icons.person, size: 20, color: Colors.blue)
+                      : null,
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      displayName,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _openUserProfile(
+                        context,
+                        userId: targetLookupUid,
+                        userName: displayName,
+                        iconBase64: displayIconBase64,
+                      ),
+                      child: Text(
+                        displayName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -473,15 +708,21 @@ class _SnsDetailScreenState extends State {
       onTap: onTap,
       borderRadius: BorderRadius.circular(20),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+        padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
         child: Row(
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(width: 4),
-            Text(
-              count != 0 ? count.toString() : '',
-              style: TextStyle(color: color, fontWeight: FontWeight.bold),
-            ),
+            Icon(icon, color: color, size: 21),
+            if (count > 0) ...[
+              const SizedBox(width: 4),
+              Text(
+                count.toString(),
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -497,13 +738,11 @@ class _SnsDetailScreenState extends State {
         title: GestureDetector(
           onLongPress: () {
             setState(() {
-              _manualDevMode = !_manualDevMode;
+              _isDeveloper = !_isDeveloper;
             });
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text(
-                  _isDeveloper ? '🛠️ 開発者モードが有効になりました' : '開発者モードを終了しました',
-                ),
+                content: Text(_isDeveloper ? '🛠️ 開発者モード：ON' : '開発者モード：OFF'),
                 duration: const Duration(seconds: 2),
               ),
             );
@@ -537,8 +776,10 @@ class _SnsDetailScreenState extends State {
 
               final Map post = Map.from(postDoc.data() as Map);
               final bool isRecipePost = post['isRecipePost'] == true;
-              final int repliesCount =
-                  int.tryParse(post['replies']?.toString() ?? '0') ?? 0;
+              final int repliesCount = _readReactionCount(
+                post['replies'],
+                const [],
+              );
 
               final List likedUsers = post['likedUsers'] != null
                   ? List.from(post['likedUsers'])
@@ -566,6 +807,17 @@ class _SnsDetailScreenState extends State {
                 post['saves'],
                 savedUsers,
               );
+              final int impressionsCount = AiKnowledgeService.readIntField(
+                post['impressions'],
+              );
+
+              _recordDetailImpressionOnce(
+                likes: likesCount,
+                helpfuls: helpfulsCount,
+                saves: savesCount,
+                replies: repliesCount,
+                currentImpressions: impressionsCount,
+              );
 
               final String postUserId = post['userId']?.toString() ?? '';
               final String rawUserName = post['userName']?.toString() ?? '名無し';
@@ -578,6 +830,10 @@ class _SnsDetailScreenState extends State {
               final String cacheUserKey = targetLookupUid.isNotEmpty
                   ? targetLookupUid
                   : rawUserName;
+              final String postSummary =
+                  (post['title']?.toString().isNotEmpty == true)
+                  ? post['title'].toString()
+                  : (post['content']?.toString() ?? '');
 
               final List postImages = _extractImages('detail_$_postId', post);
 
@@ -652,18 +908,27 @@ class _SnsDetailScreenState extends State {
                             children: [
                               Row(
                                 children: [
-                                  CircleAvatar(
-                                    radius: 22,
-                                    backgroundColor: Colors.blue.shade100,
-                                    backgroundImage: userIconBytes != null
-                                        ? MemoryImage(userIconBytes)
-                                        : null,
-                                    child: userIconBytes == null
-                                        ? const Icon(
-                                            Icons.person,
-                                            color: Colors.blue,
-                                          )
-                                        : null,
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => _openUserProfile(
+                                      context,
+                                      userId: targetLookupUid,
+                                      userName: displayUserName,
+                                      iconBase64: displayIconBase64,
+                                    ),
+                                    child: CircleAvatar(
+                                      radius: 22,
+                                      backgroundColor: Colors.blue.shade100,
+                                      backgroundImage: userIconBytes != null
+                                          ? MemoryImage(userIconBytes)
+                                          : null,
+                                      child: userIconBytes == null
+                                          ? const Icon(
+                                              Icons.person,
+                                              color: Colors.blue,
+                                            )
+                                          : null,
+                                    ),
                                   ),
                                   const SizedBox(width: 12),
                                   Expanded(
@@ -673,11 +938,20 @@ class _SnsDetailScreenState extends State {
                                       spacing: 6,
                                       runSpacing: 4,
                                       children: [
-                                        Text(
-                                          displayUserName,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
+                                        GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () => _openUserProfile(
+                                            context,
+                                            userId: targetLookupUid,
+                                            userName: displayUserName,
+                                            iconBase64: displayIconBase64,
+                                          ),
+                                          child: Text(
+                                            displayUserName,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
                                           ),
                                         ),
                                         if (post['mainCategory'] != null &&
@@ -729,7 +1003,7 @@ class _SnsDetailScreenState extends State {
                                   ),
                                   if (_isDeveloper)
                                     IconButton(
-                                      tooltip: '開発者専用：数値を変更',
+                                      tooltip: '開発者専用：数値・スコアを変更',
                                       icon: const Icon(
                                         Icons.build_circle_outlined,
                                         color: Colors.deepPurple,
@@ -738,7 +1012,10 @@ class _SnsDetailScreenState extends State {
                                           _showDeveloperEditCountsDialog(
                                             currentLikes: likesCount,
                                             currentHelpfuls: helpfulsCount,
+                                            currentSaves: savesCount,
                                             currentReplies: repliesCount,
+                                            currentImpressions:
+                                                impressionsCount,
                                           ),
                                     ),
                                 ],
@@ -894,64 +1171,72 @@ class _SnsDetailScreenState extends State {
                                         ],
                                       ),
                                       const SizedBox(height: 4),
-                                      ...recipeIngredients.map((rawIng) {
-                                        final ingMap = rawIng as Map;
-                                        final name =
-                                            ingMap['name']?.toString() ?? '';
-                                        final rawAmt =
-                                            ingMap['amount']?.toString() ?? '';
-                                        final scaledAmt = _scaleAmountString(
-                                          rawAmt,
-                                          baseServings,
-                                          currentServings,
-                                        );
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 2.0,
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Expanded(
-                                                child: Text(
-                                                  '・$name : $scaledAmt',
-                                                  style: const TextStyle(
-                                                    fontSize: 13,
+                                      for (final rawIng in recipeIngredients)
+                                        Builder(
+                                          builder: (_) {
+                                            final ingMap = rawIng as Map;
+                                            final name =
+                                                ingMap['name']?.toString() ??
+                                                '';
+                                            final rawAmt =
+                                                ingMap['amount']?.toString() ??
+                                                '';
+                                            final scaledAmt =
+                                                _scaleAmountString(
+                                                  rawAmt,
+                                                  baseServings,
+                                                  currentServings,
+                                                );
+                                            return Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 2.0,
                                                   ),
-                                                ),
-                                              ),
-                                              TextButton(
-                                                onPressed: () =>
-                                                    _askAiIngredientSubstitution(
-                                                      dishTitle:
-                                                          post['title']
-                                                              ?.toString() ??
-                                                          'レシピ',
-                                                      targetIngredient: name,
-                                                      allIngredients:
-                                                          recipeIngredients,
-                                                    ),
-                                                style: TextButton.styleFrom(
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 6,
-                                                        vertical: 2,
+                                              child: Row(
+                                                children: [
+                                                  Expanded(
+                                                    child: Text(
+                                                      '・$name : $scaledAmt',
+                                                      style: const TextStyle(
+                                                        fontSize: 13,
                                                       ),
-                                                  minimumSize: Size.zero,
-                                                  tapTargetSize:
-                                                      MaterialTapTargetSize
-                                                          .shrinkWrap,
-                                                ),
-                                                child: const Text(
-                                                  'AI代用案',
-                                                  style: TextStyle(
-                                                    fontSize: 11,
+                                                    ),
                                                   ),
-                                                ),
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        _askAiIngredientSubstitution(
+                                                          dishTitle:
+                                                              post['title']
+                                                                  ?.toString() ??
+                                                              'レシピ',
+                                                          targetIngredient:
+                                                              name,
+                                                          allIngredients:
+                                                              recipeIngredients,
+                                                        ),
+                                                    style: TextButton.styleFrom(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                            horizontal: 6,
+                                                            vertical: 2,
+                                                          ),
+                                                      minimumSize: Size.zero,
+                                                      tapTargetSize:
+                                                          MaterialTapTargetSize
+                                                              .shrinkWrap,
+                                                    ),
+                                                    child: const Text(
+                                                      'AI代用案',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
-                                            ],
-                                          ),
-                                        );
-                                      }),
+                                            );
+                                          },
+                                        ),
                                       if (recipeSteps.isNotEmpty) ...[
                                         const SizedBox(height: 8),
                                         const Text(
@@ -1010,10 +1295,16 @@ class _SnsDetailScreenState extends State {
                                     color: isLiked ? Colors.pink : Colors.grey,
                                     count: likesCount,
                                     onTap: () => _toggleReaction(
-                                      'likedUsers',
-                                      'likes',
-                                      likedUsers,
-                                      likesCount,
+                                      listField: 'likedUsers',
+                                      countField: 'likes',
+                                      currentUsers: likedUsers,
+                                      likesCount: likesCount,
+                                      helpfulsCount: helpfulsCount,
+                                      savesCount: savesCount,
+                                      repliesCount: repliesCount,
+                                      impressionsCount: impressionsCount,
+                                      postOwnerUid: postUserId,
+                                      postSummary: postSummary,
                                     ),
                                   ),
                                   _buildActionButton(
@@ -1025,10 +1316,16 @@ class _SnsDetailScreenState extends State {
                                         : Colors.grey,
                                     count: helpfulsCount,
                                     onTap: () => _toggleReaction(
-                                      'helpfulUsers',
-                                      'helpfuls',
-                                      helpfulUsers,
-                                      helpfulsCount,
+                                      listField: 'helpfulUsers',
+                                      countField: 'helpfuls',
+                                      currentUsers: helpfulUsers,
+                                      likesCount: likesCount,
+                                      helpfulsCount: helpfulsCount,
+                                      savesCount: savesCount,
+                                      repliesCount: repliesCount,
+                                      impressionsCount: impressionsCount,
+                                      postOwnerUid: postUserId,
+                                      postSummary: postSummary,
                                     ),
                                   ),
                                   _buildActionButton(
@@ -1036,12 +1333,27 @@ class _SnsDetailScreenState extends State {
                                         ? Icons.bookmark
                                         : Icons.bookmark_border,
                                     color: isSaved ? Colors.blue : Colors.grey,
-                                    count: 0,
+                                    count: savesCount,
                                     onTap: () => _toggleReaction(
-                                      'savedUsers',
-                                      'saves',
-                                      savedUsers,
-                                      savesCount,
+                                      listField: 'savedUsers',
+                                      countField: 'saves',
+                                      currentUsers: savedUsers,
+                                      likesCount: likesCount,
+                                      helpfulsCount: helpfulsCount,
+                                      savesCount: savesCount,
+                                      repliesCount: repliesCount,
+                                      impressionsCount: impressionsCount,
+                                      postOwnerUid: postUserId,
+                                      postSummary: postSummary,
+                                    ),
+                                  ),
+                                  _buildActionButton(
+                                    icon: Icons.auto_awesome_outlined,
+                                    color: Colors.teal,
+                                    count: 0,
+                                    onTap: () => _openPostInAiChat(
+                                      post,
+                                      displayUserName,
                                     ),
                                   ),
                                 ],

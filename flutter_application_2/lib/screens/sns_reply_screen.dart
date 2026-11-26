@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import 'user_profile_screen.dart' show UserProfileScreen;
+
 class SnsReplyScreen extends StatefulWidget {
   final String postId;
   final dynamic originalPost;
@@ -25,6 +27,24 @@ class _SnsReplyScreenState extends State {
 
   final TextEditingController _replyController = TextEditingController();
   bool _isSending = false;
+
+  void _openUserProfile(
+    BuildContext context, {
+    required String userId,
+    required String userName,
+    required String iconBase64,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => UserProfileScreen(
+          userId: userId,
+          userName: userName,
+          initialIconBase64: iconBase64,
+        ),
+      ),
+    );
+  }
 
   Uint8List? _decodeBase64(String? base64String) {
     if (base64String == null || base64String.trim().isEmpty) return null;
@@ -164,9 +184,12 @@ class _SnsReplyScreenState extends State {
   @override
   Widget build(BuildContext context) {
     final post = _originalPost;
-    final String postUserId = post != null ? (post['userId']?.toString() ?? '') : '';
-    final String rawName = post != null ? (post['userName']?.toString() ?? '名無し') : '名無し';
-    final String rawIcon = post != null ? (post['userIconBase64']?.toString() ?? '') : '';
+    final String postUserId =
+        post != null ? (post['userId']?.toString() ?? '') : '';
+    final String rawName =
+        post != null ? (post['userName']?.toString() ?? '名無し') : '名無し';
+    final String rawIcon =
+        post != null ? (post['userIconBase64']?.toString() ?? '') : '';
     final List postImages = _extractPostImages(post);
 
     return Scaffold(
@@ -244,27 +267,45 @@ class _SnsReplyScreenState extends State {
                       children: [
                         Row(
                           children: [
-                            CircleAvatar(
-                              radius: 18,
-                              backgroundColor: Colors.blue.shade100,
-                              backgroundImage: iconBytes != null
-                                  ? MemoryImage(iconBytes)
-                                  : null,
-                              child: iconBytes == null
-                                  ? const Icon(
-                                      Icons.person,
-                                      size: 20,
-                                      color: Colors.blue,
-                                    )
-                                  : null,
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => _openUserProfile(
+                                context,
+                                userId: postUserId,
+                                userName: displayUserName,
+                                iconBase64: displayIconBase64,
+                              ),
+                              child: CircleAvatar(
+                                radius: 18,
+                                backgroundColor: Colors.blue.shade100,
+                                backgroundImage: iconBytes != null
+                                    ? MemoryImage(iconBytes)
+                                    : null,
+                                child: iconBytes == null
+                                    ? const Icon(
+                                        Icons.person,
+                                        size: 20,
+                                        color: Colors.blue,
+                                      )
+                                    : null,
+                              ),
                             ),
                             const SizedBox(width: 10),
                             Expanded(
-                              child: Text(
-                                displayUserName,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 15,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _openUserProfile(
+                                  context,
+                                  userId: postUserId,
+                                  userName: displayUserName,
+                                  iconBase64: displayIconBase64,
+                                ),
+                                child: Text(
+                                  displayUserName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 15,
+                                  ),
                                 ),
                               ),
                             ),

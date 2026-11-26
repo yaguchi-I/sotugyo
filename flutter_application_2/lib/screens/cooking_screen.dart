@@ -1,12 +1,14 @@
 import 'dart:convert';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
-import 'ai_chat_screen.dart';
+import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
+import 'ai_chat_screen.dart' show AiChatScreen;
+import 'sns_detail_screen.dart' show SnsDetailScreen;
+import '../widgets/top_toast.dart' show showReactionToast;
 
 class CookingScreen extends StatefulWidget {
   const CookingScreen({super.key});
@@ -19,14 +21,15 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final String _currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-  List _recipeStock = [];
+  final List _recipeStock = [];
   final List _recipes = [];
-  List _savedRecipes = [];
+  final List _communityRecipes = [];
   final List _recentTitles = [];
-  final List _recentIngredients = [];
   final Map _servingsPerRecipe = {};
+  final Map _savedDocIdByTitle = {};
 
   List _cachedMissingAppliances = [];
+  List _cachedBlockedUsers = [];
   String _cachedUserArea = '日本';
 
   bool _isLoadingRecipes = true;
@@ -38,92 +41,264 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     {
       'emoji': '🎲',
       'label': 'おまかせ',
-      'rule': '3品それぞれ異なるメイン食材（肉・魚介・卵や豆腐など）と異なる調理法を組み合わせたバラエティ豊かな献立にすること。',
+      'rule': '3品それぞれ異なるメイン食材と調理法を組み合わせたバラエティ豊かな献立にすること。',
+    },
+    {
+      'emoji': '💰',
+      'label': '超節約(150円以下)',
+      'rule': '1人分150円以下で作れるコスパ最強の節約レシピにすること。',
+    },
+    {
+      'emoji': '⚡',
+      'label': '10分時短',
+      'rule': '調理時間10分以内・洗い物最小限でサッと作れるスピードレシピにすること。',
     },
     {
       'emoji': '🍖',
       'label': 'ガッツリ肉',
-      'rule': '鶏肉・豚肉・ひき肉・ウインナー・ベーコンなどの肉類を主役にし、3品それぞれ違う種類の肉を使ってご飯が進むおかずにすること。',
+      'rule': '鶏肉・豚肉・ひき肉などを主役にしたご飯が進むおかずにすること。',
     },
     {
-      'emoji': '🐟',
-      'label': '魚・缶詰',
-      'rule': 'ツナ缶・サバ缶・鮭・ちくわ・カニカマ・しらす等の魚介や加工品を使い、3品それぞれ違う魚介食材で手軽に作れるおかずにすること。',
+      'emoji': '🍲',
+      'label': '鍋・スープ',
+      'rule': '鍋やフライパン1つで煮込んで作れる温かい汁物・鍋料理にすること。',
     },
     {
       'emoji': '🍜',
-      'label': '麺・丼もの',
-      'rule': 'うどん・パスタ・中華麺・焼きそば・そうめん、または1皿で完結する丼もの・混ぜご飯から3品すべて異なる主食メニューにすること。',
+      'label': '麺・丼',
+      'rule': 'うどん・パスタ・焼きそば・丼など1品で完結するメニューにすること。',
     },
-    {
-      'emoji': '🥬',
-      'label': '野菜・ヘルシー',
-      'rule': '旬の野菜・豆腐・厚揚げ・納豆・卵・春雨・海藻などを主役にし、3品それぞれ異なるメイン野菜を使ったヘルシーなおかずにすること。',
-    },
-    {
-      'emoji': '⚡',
-      'label': '5分スピード',
-      'rule': '包丁をほとんど使わず、調理時間5分以内・3ステップ以内で即完成する超時短メニュー3品にすること。',
-    },
-  ];
-
-  final List _basicSeasonings = [
-    '醤油',
-    'しょうゆ',
-    '塩',
-    'こしょう',
-    '胡椒',
-    '塩こしょう',
-    '砂糖',
-    '酒',
-    '料理酒',
-    'みりん',
-    '水',
-    'お湯',
-    'ごま油',
-    'サラダ油',
-    'オリーブオイル',
-    'マヨネーズ',
-    '片栗粉',
-    'めんつゆ',
-    '鶏ガラスープの素',
-    'コンソメ',
-    '和風だしの素',
-    '味噌',
-    'みそ',
-    '酢',
-    'バター',
-    'にんにく',
-    '生姜',
-    'しょうが',
-    '白ごま',
-    'いりごま',
-    '黒こしょう',
-    'ケチャップ',
-    'ソース',
-    'ポン酢',
-    'オイスターソース',
   ];
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
-    _initCookingData();
+    _seasonLabel = _getSeasonLabel(DateTime.now().month);
+    _loadUserProfileAndInitialRecipes();
   }
 
-  String _getSeason(int month) {
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  String _getSeasonLabel(int month) {
     if (const [3, 4, 5].contains(month)) return '春';
     if (const [6, 7, 8].contains(month)) return '夏';
     if (const [9, 10, 11].contains(month)) return '秋';
     return '冬';
   }
 
-  String _getTodayKey() {
-    final now = DateTime.now();
-    final m = now.month.toString().padLeft(2, '0');
-    final d = now.day.toString().padLeft(2, '0');
-    return '${now.year}-$m-$d';
+  Future _loadUserProfileAndInitialRecipes() async {
+    if (_currentUserId.isNotEmpty) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(_currentUserId)
+            .get();
+        if (doc.exists && doc.data() != null) {
+          final data = doc.data()!;
+          _cachedUserArea = (data['area'] ?? '日本').toString();
+          if (data['missingAppliances'] is List) {
+            _cachedMissingAppliances = List.from(data['missingAppliances'])
+                .map((e) => e.toString())
+                .toList();
+          }
+          if (data['blockedUsers'] is List) {
+            _cachedBlockedUsers = List.from(data['blockedUsers'])
+                .map((e) => e.toString())
+                .toList();
+          }
+        }
+      } catch (e) {}
+    }
+
+    await _generateRecommendations(forceRefresh: true);
+  }
+
+  Future _fetchCommunityPopularRecipes() async {
+    final List tags = [];
+
+    if (_selectedMood == '超節約(150円以下)') {
+      tags.addAll(['もやし', '豆腐', '卵', 'うどん', 'ツナ缶', '豚こま', 'キャベツ']);
+    } else if (_selectedMood == '10分時短') {
+      tags.addAll(['卵', '豚肉', 'もやし', 'フライパン', '丼', 'うどん', '炒め']);
+    } else if (_selectedMood == 'ガッツリ肉') {
+      tags.addAll(['豚肉', '鶏肉', 'ひき肉', '肉巻き', 'スタミナ丼', '生姜焼き', '唐揚げ']);
+    } else if (_selectedMood == '鍋・スープ') {
+      tags.addAll(['鍋', '鍋料理', 'スープ', '煮込み', '味噌汁', 'ミルフィーユ鍋', '白菜']);
+    } else if (_selectedMood == '麺・丼') {
+      tags.addAll(['パスタ', 'うどん', '焼きそば', 'ラーメン', '親子丼', 'スタミナ丼', '漬け丼']);
+    } else {
+      tags.addAll(['豚肉', '鶏肉', '卵', 'キャベツ', 'もやし', 'うどん', 'パスタ', '鍋']);
+    }
+
+    try {
+      final rawFound = await AiKnowledgeService.searchRelevantCommunityPosts(
+        searchTags: tags,
+        category: '料理',
+        preferredPriceTier: _selectedMood == '超節約(150円以下)' ? 'low' : 'any',
+        maxBudgetYen: _selectedMood == '超節約(150円以下)' ? 200 : -1,
+        missingAppliances: _cachedMissingAppliances,
+        currentUserId: _currentUserId,
+        blockedUsers: _cachedBlockedUsers,
+        topK: 3,
+      );
+
+      if (mounted && rawFound is List) {
+        setState(() {
+          _communityRecipes
+            ..clear()
+            ..addAll(rawFound);
+        });
+      }
+    } catch (e) {}
+  }
+
+  void _popThreeFromStock() {
+    final List nextThree = [];
+    while (_recipeStock.isNotEmpty && nextThree.length < 3) {
+      final item = _recipeStock.removeAt(0) as Map;
+      nextThree.add(item);
+      final title = (item['title'] ?? '').toString();
+      if (title.isNotEmpty) {
+        _recentTitles.add(title);
+      }
+    }
+    if (_recentTitles.length > 24) {
+      _recentTitles.removeRange(0, _recentTitles.length - 24);
+    }
+    setState(() {
+      _recipes
+        ..clear()
+        ..addAll(nextThree);
+      _isLoadingRecipes = false;
+      _errorMessage = '';
+    });
+  }
+
+  List? _parseRecipeListJson(String rawText) {
+    final fence = String.fromCharCodes([96, 96, 96]);
+    final cleaned = rawText
+        .replaceAll('${fence}json', '')
+        .replaceAll(fence, '')
+        .trim();
+    final startIdx = cleaned.indexOf('[');
+    final endIdx = cleaned.lastIndexOf(']');
+    if (startIdx == -1 || endIdx == -1 || endIdx <= startIdx) return null;
+    try {
+      final decoded = jsonDecode(cleaned.substring(startIdx, endIdx + 1));
+      if (decoded is List) {
+        final List result = [];
+        for (final item in decoded) {
+          if (item is Map) {
+            result.add(Map.from(item));
+          }
+        }
+        return result;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  Future _generateRecommendations({bool forceRefresh = false}) async {
+    if (!forceRefresh && _recipeStock.length >= 3) {
+      _popThreeFromStock();
+      return;
+    }
+
+    setState(() {
+      _isLoadingRecipes = true;
+      _errorMessage = '';
+      if (forceRefresh) {
+        _recipeStock.clear();
+      }
+    });
+
+    final communityFuture = _fetchCommunityPopularRecipes();
+
+    final currentKey = AiChatScreen.apiKey.trim();
+    if (currentKey.isEmpty || currentKey.contains('ここに')) {
+      await communityFuture;
+      if (mounted) {
+        setState(() {
+          _isLoadingRecipes = false;
+          _errorMessage = 'ai_chat_screen.dart にAPIキーを設定してください。';
+        });
+      }
+      return;
+    }
+
+    final Map moodObj = _moodChips.firstWhere(
+      (m) => (m as Map)['label'] == _selectedMood,
+      orElse: () => _moodChips.first,
+    ) as Map;
+    final missingText = _cachedMissingAppliances.isEmpty
+        ? '特になし'
+        : _cachedMissingAppliances.join('、');
+    final excludeTitlesText = _recentTitles.isEmpty
+        ? 'なし'
+        : _recentTitles.join('、');
+
+    final prompt =
+        'あなたは一人暮らし専門の優秀な料理家です。\n'
+        '以下の条件を厳守して、実用的な自炊レシピを6品考案し、必ずJSON配列形式のみで出力してください。\n\n'
+        '【条件】\n'
+        '・季節: $_seasonLabel / 居住エリア気候目安: $_cachedUserArea\n'
+        '・持っていない調理家電（絶対に使用禁止）: $missingText\n'
+        '・気分ルール: ${moodObj['rule']}\n'
+        '・スーパーで安く手に入る身近な食材を使うこと。\n'
+        '・直近で提案済みの除外料理名: $excludeTitlesText\n'
+        '・すべて1人分の分量と目安費用にすること（分量は数値を含めること）。\n\n'
+        '【出力JSON配列フォーマット（説明文なし・JSON配列のみ）】\n'
+        '[\n'
+        '  {\n'
+        '    "title": "料理名",\n'
+        '    "time": "約10分",\n'
+        '    "cost": "約180円",\n'
+        '    "reason": "おすすめポイント（35文字以内）",\n'
+        '    "ingredients": [{"name": "豚こま肉", "amount": "100g"}, {"name": "キャベツ", "amount": "2枚"}],\n'
+        '    "steps": "1. 切る\\n2. 炒める\\n3. 味付けして完成"\n'
+        '  }\n'
+        ']';
+
+    List? generatedList;
+    for (final modelItem in AiChatScreen.fallbackModels) {
+      try {
+        final model = GenerativeModel(
+          model: modelItem.toString(),
+          apiKey: currentKey,
+          generationConfig: GenerationConfig(temperature: 0.75),
+        );
+        final res = await model
+            .generateContent([Content.text(prompt)])
+            .timeout(const Duration(seconds: 25));
+        if (res.text != null && res.text!.trim().isNotEmpty) {
+          final parsed = _parseRecipeListJson(res.text!);
+          if (parsed != null && parsed.isNotEmpty) {
+            generatedList = parsed;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    await communityFuture;
+    if (!mounted) return;
+
+    if (generatedList != null && generatedList.isNotEmpty) {
+      _recipeStock
+        ..clear()
+        ..addAll(generatedList);
+      _popThreeFromStock();
+    } else {
+      setState(() {
+        _isLoadingRecipes = false;
+        _errorMessage = 'レシピの作成に失敗しました。少し待ってから再度お試しください。';
+      });
+    }
   }
 
   String _formatScaledNumber(double val) {
@@ -133,13 +308,19 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     return val.toStringAsFixed(1);
   }
 
-  String _scaleTextWithRatio(String rawText, int targetServings) {
-    if (targetServings <= 1) return rawText;
-    final double ratio = targetServings.toDouble();
+  String _scaleAmountString(
+    String rawAmount,
+    int baseServings,
+    int targetServings,
+  ) {
+    if (baseServings <= 0 || baseServings == targetServings) {
+      return rawAmount;
+    }
+    final double ratio = targetServings / baseServings;
 
     final fractionRegex = RegExp(r'(\d+)\s*/\s*(\d+)');
-    if (fractionRegex.hasMatch(rawText)) {
-      return rawText.replaceAllMapped(fractionRegex, (match) {
+    if (fractionRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(fractionRegex, (match) {
         final num = double.tryParse(match.group(1) ?? '1') ?? 1;
         final den = double.tryParse(match.group(2) ?? '1') ?? 1;
         if (den == 0) return match.group(0) ?? '';
@@ -148,313 +329,33 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     }
 
     final decimalRegex = RegExp(r'(\d+(?:\.\d+)?)');
-    if (decimalRegex.hasMatch(rawText)) {
-      return rawText.replaceAllMapped(decimalRegex, (match) {
+    if (decimalRegex.hasMatch(rawAmount)) {
+      return rawAmount.replaceAllMapped(decimalRegex, (match) {
         final num = double.tryParse(match.group(1) ?? '0') ?? 0;
         return _formatScaledNumber(num * ratio);
       });
     }
 
-    return '$rawText（×$targetServings）';
-  }
-
-  void _recordHistoryFromRecipes(List recipeList) {
-    for (final item in recipeList) {
-      final mapItem = item as Map;
-      final title = mapItem['title']?.toString().trim() ?? '';
-      if (title.isNotEmpty && !_recentTitles.contains(title)) {
-        _recentTitles.add(title);
-      }
-
-      final List ingList = List.from(mapItem['ingredients'] ?? []);
-      for (final rawIng in ingList) {
-        final cleanName = rawIng
-            .toString()
-            .split(RegExp(r'[\s :：0-9０-９（(]'))
-            .first
-            .trim();
-        if (cleanName.length >= 2 &&
-            !_basicSeasonings.contains(cleanName) &&
-            !_recentIngredients.contains(cleanName)) {
-          _recentIngredients.add(cleanName);
-        }
-      }
-    }
-
-    if (_recentTitles.length > 40) {
-      _recentTitles.removeRange(0, _recentTitles.length - 40);
-    }
-    if (_recentIngredients.length > 25) {
-      _recentIngredients.removeRange(0, _recentIngredients.length - 25);
-    }
-  }
-
-  Future _initCookingData() async {
-    final now = DateTime.now();
-    final season = _getSeason(now.month);
-    if (mounted) {
-      setState(() {
-        _seasonLabel = '${now.month}月${now.day}日（$season）のAIおすすめ';
-        _isLoadingRecipes = true;
-        _errorMessage = '';
-      });
-    }
-
-    final todayKey = _getTodayKey();
-
-    if (_currentUserId.isNotEmpty) {
-      try {
-        final doc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(_currentUserId)
-            .get();
-        if (!mounted) return;
-        if (doc.exists && doc.data() != null) {
-          final data = doc.data()!;
-          if (data['missingAppliances'] != null) {
-            _cachedMissingAppliances = List.from(data['missingAppliances']);
-          }
-          if (data['area'] != null &&
-              data['area'].toString().trim().isNotEmpty) {
-            _cachedUserArea = data['area'].toString().trim();
-          }
-          if (data['savedCookingRecipeItems'] != null) {
-            _savedRecipes = List.from(data['savedCookingRecipeItems']);
-          }
-          if (data['dailyRecipesDate'] == todayKey &&
-              data['dailyRecipes'] != null) {
-            final loaded = List.from(data['dailyRecipes']);
-            if (loaded.isNotEmpty) {
-              _recordHistoryFromRecipes(loaded);
-              setState(() {
-                _recipes.clear();
-                _recipes.addAll(loaded.take(3));
-                if (loaded.length > 3) {
-                  _recipeStock = loaded.skip(3).toList();
-                }
-                _isLoadingRecipes = false;
-              });
-              return;
-            }
-          }
-        }
-      } catch (e) {}
-    }
-
-    await _fetchAndStockRecipes(forceRefresh: false);
-  }
-
-  String _extractJsonArray(String raw) {
-    final cleaned = raw.replaceAll('```json', '').replaceAll('```', '').trim();
-    final start = cleaned.indexOf('[');
-    final end = cleaned.lastIndexOf(']');
-    if (start != -1 && end != -1 && end > start) {
-      return cleaned.substring(start, end + 1);
-    }
-    return cleaned;
-  }
-
-  void _onPressNextMenu() {
-    if (_recipeStock.length >= 3) {
-      final nextThree = _recipeStock.take(3).toList();
-      _recipeStock.removeRange(0, 3);
-      _recordHistoryFromRecipes(nextThree);
-
-      setState(() {
-        _recipes.clear();
-        _recipes.addAll(nextThree);
-      });
-
-      if (_recipeStock.length < 3) {
-        _fetchAndStockRecipes(forceRefresh: true);
-      }
-    } else {
-      _fetchAndStockRecipes(forceRefresh: true);
-    }
-  }
-
-  Future _fetchAndStockRecipes({required bool forceRefresh}) async {
-    if (_recipes.isNotEmpty) {
-      _recordHistoryFromRecipes(_recipes);
-    }
-    if (_recipeStock.isNotEmpty) {
-      _recordHistoryFromRecipes(_recipeStock);
-    }
-
-    if (mounted && _recipes.isEmpty) {
-      setState(() {
-        _isLoadingRecipes = true;
-        _errorMessage = '';
-      });
-    }
-
-    final currentKey = AiChatScreen.apiKey.trim();
-    if (currentKey.isEmpty || currentKey.contains('ここに')) {
-      if (mounted) {
-        setState(() {
-          _isLoadingRecipes = false;
-          _errorMessage = 'AIチャット画面（ai_chat_screen.dart）にAPIキーを設定してください。';
-        });
-      }
-      return;
-    }
-
-    final now = DateTime.now();
-    final todayKey = _getTodayKey();
-    final missingText = _cachedMissingAppliances.isEmpty
-        ? '特になし'
-        : _cachedMissingAppliances.join('、');
-
-    final selectedMoodObj = _moodChips.firstWhere(
-      (m) => (m as Map)['label'] == _selectedMood,
-      orElse: () => _moodChips.first,
-    ) as Map;
-    final moodRule = selectedMoodObj['rule'].toString();
-
-    final bannedTitlesText = _recentTitles.isEmpty
-        ? 'なし'
-        : _recentTitles.join('、');
-    final bannedIngsText = _recentIngredients.isEmpty
-        ? 'なし'
-        : _recentIngredients.join('、');
-
-    final prompt =
-        '一人暮らしの自炊レシピを合計9品（3品×3セット分）考案し、JSON配列のみで出力してください。\n'
-        '【絶対条件】\n'
-        '1. 使用禁止の調理家電：【$missingText】（これらを使う調理工程は一切含めないこと）\n'
-        '2. 選択ジャンル：【$_selectedMood】→ $moodRule\n'
-        '3. 特定地域の名産品や郷土料理への偏りは一切禁止。全国どこのスーパーでも安く買える一般的な食材で作ること。\n'
-        '4. 直近に表示した以下の食材と料理は【使用禁止】とし、全く別の主材料・別の野菜で考案すること：\n'
-        '   ・使用禁止の食材：【$bannedIngsText】\n'
-        '   ・出力禁止の料理名：【$bannedTitlesText】\n'
-        '5. 9品すべて異なる料理名、異なる主材料にすること。\n'
-        '6. 分量はすべて「1人分」を基準に具体的な数値（g、個、大さじ、小さじ等）で書くこと。\n\n'
-        '以下のJSON配列フォーマットのみで9品分を出力してください（前後の説明文やMarkdown記号は不要）：\n'
-        '[\n'
-        '  {\n'
-        '    "id": "r_${now.millisecondsSinceEpoch}_1",\n'
-        '    "title": "料理名",\n'
-        '    "time": "約10分",\n'
-        '    "cost": "約180円",\n'
-        '    "ingredients": ["材料名 分量", "調味料名 分量"],\n'
-        '    "steps": ["手順1", "手順2", "手順3"]\n'
-        '  }\n'
-        ']';
-
-    List? parsedList;
-    Object? lastErr;
-
-    final List liteModels = [
-      'gemini-3.5-flash-lite',
-      'gemini-2.5-flash-lite',
-      'gemini-3.5-flash',
-    ];
-
-    for (final modelItem in liteModels) {
-      try {
-        final model = GenerativeModel(
-          model: modelItem.toString(),
-          apiKey: currentKey,
-        );
-        final response = await model
-            .generateContent([Content.text(prompt)])
-            .timeout(const Duration(seconds: 25));
-        final rawText = response.text ?? '';
-        if (rawText.trim().isNotEmpty) {
-          final jsonStr = _extractJsonArray(rawText);
-          final decoded = jsonDecode(jsonStr);
-          if (decoded is List && decoded.isNotEmpty) {
-            parsedList = decoded;
-            break;
-          }
-        }
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-
-    if (!mounted) return;
-
-    if (parsedList != null && parsedList.isNotEmpty) {
-      _recordHistoryFromRecipes(parsedList);
-
-      setState(() {
-        if (_recipes.isEmpty) {
-          _recipes.addAll(parsedList!.take(3));
-          if (parsedList!.length > 3) {
-            _recipeStock = parsedList!.skip(3).toList();
-          }
-        } else {
-          _recipeStock.addAll(parsedList!);
-        }
-        _isLoadingRecipes = false;
-        _errorMessage = '';
-      });
-
-      if (_currentUserId.isNotEmpty) {
-        FirebaseFirestore.instance.collection('users').doc(_currentUserId).set({
-          'dailyRecipesDate': todayKey,
-          'dailyRecipes': [..._recipes, ..._recipeStock],
-        }, SetOptions(merge: true));
-      }
-    } else {
-      if (_recipes.isEmpty) {
-        setState(() {
-          _isLoadingRecipes = false;
-          _errorMessage = 'レシピの取得に失敗しました。もう一度お試しください。\n($lastErr)';
-        });
-      }
-    }
-  }
-
-  bool _isRecipeSaved(String title) {
-    return _savedRecipes.any((item) => (item as Map)['title'] == title);
-  }
-
-  Future _toggleSaveRecipe(Map recipe) async {
-    if (_currentUserId.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final title = recipe['title']?.toString() ?? '';
-    final alreadySaved = _isRecipeSaved(title);
-
-    setState(() {
-      if (alreadySaved) {
-        _savedRecipes.removeWhere((item) => (item as Map)['title'] == title);
-      } else {
-        _savedRecipes.add(recipe);
-      }
-    });
-
-    try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(_currentUserId)
-          .set({
-            'savedCookingRecipeItems': _savedRecipes,
-          }, SetOptions(merge: true));
-
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            alreadySaved ? '「$title」の保存を解除しました' : '「$title」を保存したレシピに追加しました！',
-          ),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (e) {}
+    return '$rawAmount（×${_formatScaledNumber(ratio)}）';
   }
 
   Future _askAiSubstitution({
-    required Map recipe,
+    required String dishTitle,
+    required List allIngredients,
     String? targetIngredient,
   }) async {
     final currentKey = AiChatScreen.apiKey.trim();
-    if (currentKey.isEmpty || currentKey.contains('ここに')) return;
+    if (currentKey.isEmpty || currentKey.contains('ここに')) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('AIチャット画面でAPIキーを設定してください')));
+      return;
+    }
 
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => const AlertDialog(
+      builder: (_) => const AlertDialog(
         content: Row(
           children: [
             CircularProgressIndicator(),
@@ -465,35 +366,29 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
       ),
     );
 
-    final title = recipe['title']?.toString() ?? '料理';
-    final List ingList = List.from(recipe['ingredients'] ?? []);
-    final List stepList = List.from(recipe['steps'] ?? []);
+    final ingNames = allIngredients
+        .where((e) => e is Map)
+        .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}'.trim())
+        .join('、');
     final missingText = _cachedMissingAppliances.isEmpty
         ? '特になし'
         : _cachedMissingAppliances.join('、');
 
     final prompt = targetIngredient != null
-        ? '料理「$title」（材料：${ingList.join('、')}）を作る際、「$targetIngredient」が家にありません。\n'
-              '一人暮らしの家によくある身近な食材や調味料で代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
-        : '料理「$title」（材料：${ingList.join('、')} / 手順：${stepList.join('→')}）について、\n'
+        ? '料理「$dishTitle」（材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
+              '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
+        : '料理「$dishTitle」（材料：$ingNames）について、\n'
               '持っていない調理家電【$missingText】を使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
 
-    String replyText = '代用案を取得できませんでした。もう一度お試しください。';
-
-    for (final modelItem in [
-      'gemini-3.5-flash-lite',
-      'gemini-2.5-flash-lite',
-    ]) {
+    String reply = '代用案を取得できませんでした。';
+    for (final m in AiChatScreen.fallbackModels) {
       try {
-        final model = GenerativeModel(
-          model: modelItem.toString(),
-          apiKey: currentKey,
-        );
+        final model = GenerativeModel(model: m.toString(), apiKey: currentKey);
         final res = await model
             .generateContent([Content.text(prompt)])
-            .timeout(const Duration(seconds: 15));
+            .timeout(const Duration(seconds: 20));
         if (res.text != null && res.text!.trim().isNotEmpty) {
-          replyText = res.text!.trim();
+          reply = res.text!.replaceAll('**', '').replaceAll('##', '').trim();
           break;
         }
       } catch (e) {}
@@ -504,7 +399,7 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
 
     showDialog(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: Row(
           children: [
             const Icon(Icons.auto_awesome, color: Colors.orange),
@@ -513,7 +408,7 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
               child: Text(
                 targetIngredient != null
                     ? '「$targetIngredient」の代用案'
-                    : '「$title」のAI代替提案',
+                    : '「$dishTitle」のAI代替提案',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -523,14 +418,11 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
           ],
         ),
         content: SingleChildScrollView(
-          child: Text(
-            replyText,
-            style: const TextStyle(fontSize: 15, height: 1.5),
-          ),
+          child: Text(reply, style: const TextStyle(fontSize: 15, height: 1.5)),
         ),
         actions: [
           ElevatedButton(
-            onPressed: () => Navigator.pop(dialogContext),
+            onPressed: () => Navigator.pop(ctx),
             child: const Text('閉じる'),
           ),
         ],
@@ -538,251 +430,261 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     );
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
+  Future _toggleSaveRecipeToBookmarks(Map recipe, String? existingDocId) async {
+    if (_currentUserId.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('保存するにはログインが必要です')));
+      return;
+    }
+
+    final String title = (recipe['title'] ?? 'AIおすすめレシピ').toString();
+
+    if (existingDocId != null && existingDocId.isNotEmpty) {
+      setState(() {
+        _savedDocIdByTitle.remove(title);
+      });
+      try {
+        await FirebaseFirestore.instance
+            .collection('posts')
+            .doc(existingDocId)
+            .update({
+              'savedUsers': FieldValue.arrayRemove([_currentUserId]),
+            });
+        if (mounted) {
+          showReactionToast(context, 'savedUsers', added: false);
+        }
+      } catch (e) {}
+      return;
+    }
+
+    final String time = (recipe['time'] ?? '').toString();
+    final String cost = (recipe['cost'] ?? '').toString();
+    final String reason = (recipe['reason'] ?? '').toString();
+    final String steps = (recipe['steps'] ?? '').toString();
+    final List ingredients = [];
+    if (recipe['ingredients'] is List) {
+      for (final item in List.from(recipe['ingredients'])) {
+        if (item is Map) {
+          ingredients.add({
+            'name': (item['name'] ?? '').toString(),
+            'amount': (item['amount'] ?? '適量').toString(),
+          });
+        }
+      }
+    }
+
+    final ingLines = ingredients
+        .map((e) => '・${(e as Map)['name']} ${e['amount']}')
+        .join('\n');
+    final fullContent =
+        '【料理名】$title\n【目安時間】$time\n【目安費用】$cost\n【材料】\n$ingLines\n【作り方】\n$steps'
+        '${reason.isNotEmpty ? "\n【ポイント】\n$reason" : ""}';
+
+    setState(() {
+      _savedDocIdByTitle[title] = 'pending';
+    });
+
+    try {
+      final docRef = await FirebaseFirestore.instance.collection('posts').add({
+        'userId': _currentUserId,
+        'userName': 'AIレシピ提案',
+        'mainCategory': 'AI',
+        'subCategory': 'レシピ',
+        'title': title,
+        'content': fullContent,
+        'hasImage': false,
+        'imageBase64': '',
+        'imagesBase64': [],
+        'isRecipePost': true,
+        'recipeTime': time,
+        'recipeCost': cost,
+        'recipeServings': 1,
+        'recipeIngredients': ingredients,
+        'recipeSteps': steps,
+        'replies': 0,
+        'likes': 0,
+        'helpfuls': 0,
+        'saves': 1,
+        'impressions': 0,
+        'valueScore': 0.0,
+        'likedUsers': [],
+        'helpfulUsers': [],
+        'savedUsers': [_currentUserId],
+        'hiddenUsers': [],
+        'reportedUsers': [],
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      setState(() {
+        _savedDocIdByTitle[title] = docRef.id;
+      });
+      showReactionToast(context, 'savedUsers', added: true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _savedDocIdByTitle.remove(title);
+      });
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.menu),
-          onPressed: () => Scaffold.of(context).openDrawer(),
-        ),
-        title: const Text(
-          '自炊レシピ',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        bottom: TabBar(
-          controller: _tabController,
-          labelColor: Colors.blue,
-          unselectedLabelColor: Colors.grey,
-          indicatorColor: Colors.blue,
-          tabs: [
-            const Tab(text: '今日のおすすめ'),
-            Tab(text: '保存したレシピ (${_savedRecipes.length})'),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildDailyTab(), _buildSavedTab()],
-      ),
-    );
-  }
+  Widget _buildCommunitySection() {
+    if (_communityRecipes.isEmpty) return const SizedBox.shrink();
 
-  Widget _buildDailyTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.blue.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.wb_sunny_outlined,
-                      color: Colors.orange,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        _seasonLabel,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              TextButton.icon(
-                onPressed: _isLoadingRecipes ? null : _onPressNextMenu,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text(
-                  '別メニューにする',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+              Icon(Icons.verified, color: Colors.blue.shade700, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                'みんなの人気レシピ（タイムラインから）',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                  color: Colors.blue.shade900,
                 ),
               ),
             ],
           ),
-        ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
-          child: Row(
-            children: _moodChips.map((chipItem) {
-              final mapItem = chipItem as Map;
-              final emoji = mapItem['emoji'].toString();
-              final label = mapItem['label'].toString();
-              final isSelected = _selectedMood == label;
+          const SizedBox(height: 10),
+          for (final rawPost in _communityRecipes)
+            Builder(
+              builder: (_) {
+                final post = rawPost as Map;
+                final docId = (post['docId'] ?? '').toString();
+                final userName = (post['userName'] ?? '名無し').toString();
+                final title = (post['title'] ?? '').toString();
+                final content = (post['content'] ?? '').toString();
+                final cost = (post['recipeCost'] ?? '').toString();
+                final helpfuls = AiKnowledgeService.readIntField(
+                  post['helpfuls'],
+                );
+                final saves = AiKnowledgeService.readIntField(post['saves']);
 
-              return Padding(
-                padding: const EdgeInsets.only(right: 8.0),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(20),
-                  onTap: _isLoadingRecipes
-                      ? null
-                      : () {
-                          setState(() {
-                            _selectedMood = label;
-                            _recipeStock.clear();
-                            _recipes.clear();
-                          });
-                          _fetchAndStockRecipes(forceRefresh: true);
-                        },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14.0,
-                      vertical: 8.0,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isSelected ? Colors.orange.shade100 : Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: isSelected
-                            ? Colors.orange.shade400
-                            : Colors.grey.shade300,
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    side: BorderSide(color: Colors.blue.shade100),
+                  ),
+                  child: ListTile(
+                    dense: true,
+                    title: Text(
+                      title.isNotEmpty ? title : content,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
                       ),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (isSelected) ...[
-                          Icon(
-                            Icons.check,
-                            size: 15,
-                            color: Colors.orange.shade900,
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 4.0),
+                      child: Row(
+                        children: [
+                          Text(
+                            '$userName さん',
+                            style: const TextStyle(fontSize: 12),
                           ),
-                          const SizedBox(width: 4),
+                          if (cost.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              cost,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                          const Spacer(),
+                          const Icon(
+                            Icons.lightbulb_outline,
+                            size: 14,
+                            color: Colors.orange,
+                          ),
+                          Text(
+                            ' $helpfuls',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(
+                            Icons.bookmark_border,
+                            size: 14,
+                            color: Colors.blue,
+                          ),
+                          Text(' $saves', style: const TextStyle(fontSize: 12)),
                         ],
-                        Text(emoji, style: const TextStyle(fontSize: 14)),
-                        const SizedBox(width: 6),
-                        Text(
-                          label,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: isSelected
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                            color: isSelected
-                                ? Colors.orange.shade900
-                                : Colors.black87,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-        const Divider(height: 8),
-        Expanded(
-          child: _isLoadingRecipes
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 16),
-                      Text(
-                        '「$_selectedMood」の新メニューを考案中...',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Colors.black54,
-                        ),
                       ),
-                    ],
-                  ),
-                )
-              : _errorMessage.isNotEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _errorMessage,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.redAccent),
-                        ),
-                        const SizedBox(height: 16),
-                        ElevatedButton.icon(
-                          onPressed: () =>
-                              _fetchAndStockRecipes(forceRefresh: true),
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('再試行する'),
-                        ),
-                      ],
                     ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      if (docId.isEmpty) return;
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => SnsDetailScreen(postId: docId),
+                        ),
+                      );
+                    },
                   ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.only(
-                    left: 16,
-                    right: 16,
-                    top: 8,
-                    bottom: 110,
-                  ),
-                  itemCount: _recipes.length,
-                  itemBuilder: (context, index) {
-                    final recipe = Map.from(_recipes[index] as Map);
-                    return _buildRecipeCard(recipe);
-                  },
-                ),
-        ),
-      ],
+                );
+              },
+            ),
+        ],
+      ),
     );
   }
 
-  Widget _buildSavedTab() {
-    if (_savedRecipes.isEmpty) {
-      return const Center(
-        child: Text(
-          '保存したレシピはまだありません。\n気に入ったレシピのブックマークを押して保存しよう！',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey),
-        ),
-      );
+  Widget _buildRecipeCard({
+    required Map recipe,
+    required String cardKey,
+    required String? savedDocId,
+  }) {
+    final String title = (recipe['title'] ?? 'おすすめレシピ').toString();
+    final String time = (recipe['time'] ?? '').toString();
+    final String rawCost = (recipe['cost'] ?? '').toString();
+    final String reason = (recipe['reason'] ?? '').toString();
+    final String steps = (recipe['steps'] ?? '').toString();
+    final int baseServings =
+        int.tryParse(recipe['servings']?.toString() ?? '1') ?? 1;
+    final List ingredients = [];
+    if (recipe['ingredients'] is List) {
+      for (final item in List.from(recipe['ingredients'])) {
+        if (item is Map) {
+          ingredients.add(Map.from(item));
+        }
+      }
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 110),
-      itemCount: _savedRecipes.length,
-      itemBuilder: (context, index) {
-        final recipe = Map.from(_savedRecipes[index] as Map);
-        return _buildRecipeCard(recipe);
-      },
+    final int servings = (_servingsPerRecipe[cardKey] as int?) ?? baseServings;
+    final String scaledCost = _scaleAmountString(
+      rawCost,
+      baseServings,
+      servings,
     );
-  }
-
-  Widget _buildRecipeCard(Map recipe) {
-    final String title = recipe['title']?.toString() ?? 'おすすめレシピ';
-    final String time = recipe['time']?.toString() ?? '約10分';
-    final String rawCost = recipe['cost']?.toString() ?? '約200円';
-    final List ingredients = List.from(recipe['ingredients'] ?? []);
-    final List steps = List.from(recipe['steps'] ?? []);
-
-    final int currentServings = (_servingsPerRecipe[title] as int?) ?? 1;
-    final String scaledCost = _scaleTextWithRatio(rawCost, currentServings);
-    final bool isSaved = _isRecipeSaved(title);
+    final bool isSaved = savedDocId != null && savedDocId.isNotEmpty;
 
     return Card(
-      margin: const EdgeInsets.only(bottom: 16.0),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      margin: const EdgeInsets.only(bottom: 16),
+      elevation: 1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: Colors.orange.shade200),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -795,208 +697,511 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
                   child: Text(
                     title,
                     style: const TextStyle(
-                      fontSize: 18,
+                      fontSize: 17,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton.icon(
-                  onPressed: () => _askAiSubstitution(recipe: recipe),
+                  onPressed: () => _askAiSubstitution(
+                    dishTitle: title,
+                    allIngredients: ingredients,
+                  ),
                   icon: const Icon(
                     Icons.auto_awesome,
-                    size: 15,
+                    size: 14,
                     color: Colors.orange,
                   ),
                   label: const Text(
-                    'AI 代替提案',
-                    style: TextStyle(fontSize: 12, color: Colors.orange),
+                    'AI代替提案',
+                    style: TextStyle(fontSize: 11, color: Colors.orange),
                   ),
                   style: OutlinedButton.styleFrom(
                     side: const BorderSide(color: Colors.orange),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
+                      horizontal: 8,
+                      vertical: 3,
                     ),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                 ),
+                const SizedBox(width: 4),
                 IconButton(
+                  tooltip: isSaved ? '保存フォルダから解除' : '保存フォルダに追加',
                   icon: Icon(
                     isSaved ? Icons.bookmark : Icons.bookmark_border,
-                    color: isSaved ? Colors.blue : Colors.black54,
+                    color: isSaved ? Colors.blue : Colors.grey,
                   ),
-                  onPressed: () => _toggleSaveRecipe(recipe),
+                  constraints: const BoxConstraints(),
+                  padding: const EdgeInsets.all(4),
+                  onPressed: () =>
+                      _toggleSaveRecipeToBookmarks(recipe, savedDocId),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            if (reason.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4.0, bottom: 8.0),
+                child: Text(
+                  reason,
+                  style: const TextStyle(fontSize: 13, color: Colors.black54),
+                ),
+              ),
             Wrap(
-              spacing: 16,
-              runSpacing: 6,
+              spacing: 12,
+              runSpacing: 4,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.schedule, size: 16, color: Colors.grey),
-                    const SizedBox(width: 4),
-                    Text(time),
-                  ],
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.payments_outlined,
-                      size: 16,
-                      color: Colors.green,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$scaledCost（$currentServings人分）',
-                      style: const TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const Divider(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  '【材料】（$currentServings人分）',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
-                ),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.blue.shade50,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
+                if (time.isNotEmpty)
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      const Icon(
+                        Icons.schedule,
+                        size: 16,
+                        color: Colors.black54,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(time, style: const TextStyle(fontSize: 13)),
+                    ],
+                  ),
+                if (scaledCost.isNotEmpty)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.payments_outlined,
+                        size: 16,
+                        color: Colors.green,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '$scaledCost（$servings人分）',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.green,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+            if (ingredients.isNotEmpty) ...[
+              const Divider(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    '材料（$servings人分）',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                  Row(
+                    children: [
                       IconButton(
-                        icon: const Icon(Icons.remove, size: 16),
+                        icon: const Icon(Icons.remove_circle_outline, size: 20),
                         constraints: const BoxConstraints(),
-                        padding: const EdgeInsets.all(6),
-                        onPressed: currentServings > 1
+                        padding: const EdgeInsets.all(4),
+                        onPressed: servings > 1
                             ? () {
                                 setState(() {
-                                  _servingsPerRecipe[title] =
-                                      currentServings - 1;
+                                  _servingsPerRecipe[cardKey] = servings - 1;
                                 });
                               }
                             : null,
                       ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                        child: Text(
-                          '$currentServings人分',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            color: Colors.blue.shade900,
-                          ),
-                        ),
+                      Text(
+                        '$servings人分',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.add, size: 16),
+                        icon: const Icon(Icons.add_circle_outline, size: 20),
                         constraints: const BoxConstraints(),
-                        padding: const EdgeInsets.all(6),
-                        onPressed: currentServings < 6
+                        padding: const EdgeInsets.all(4),
+                        onPressed: servings < 6
                             ? () {
                                 setState(() {
-                                  _servingsPerRecipe[title] =
-                                      currentServings + 1;
+                                  _servingsPerRecipe[cardKey] = servings + 1;
                                 });
                               }
                             : null,
                       ),
                     ],
                   ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              for (final rawIng in ingredients)
+                Builder(
+                  builder: (_) {
+                    final ing = rawIng as Map;
+                    final name = (ing['name'] ?? '').toString();
+                    final amt = _scaleAmountString(
+                      (ing['amount'] ?? '').toString(),
+                      baseServings,
+                      servings,
+                    );
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '・$name : $amt',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => _askAiSubstitution(
+                              dishTitle: title,
+                              allIngredients: ingredients,
+                              targetIngredient: name,
+                            ),
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: const Text(
+                              'AI代用案',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ...ingredients.map((ing) {
-              final rawIng = ing.toString();
-              final scaledIng = _scaleTextWithRatio(rawIng, currentServings);
-              final ingNameOnly = rawIng.split(RegExp(r'[\s :：]')).first;
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.check_circle_outline,
-                      size: 16,
-                      color: Colors.teal,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        scaledIng,
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                    TextButton.icon(
-                      onPressed: () => _askAiSubstitution(
-                        recipe: recipe,
-                        targetIngredient: ingNameOnly,
-                      ),
-                      icon: const Icon(Icons.swap_horiz, size: 15),
-                      label: const Text('代用案', style: TextStyle(fontSize: 12)),
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
+            ],
+            if (steps.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              const Text(
+                '作り方',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+              ),
+              const SizedBox(height: 4),
+              Text(steps, style: const TextStyle(fontSize: 14, height: 1.5)),
+            ],
             const SizedBox(height: 12),
-            const Text(
-              '【作り方】',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-            ),
-            const SizedBox(height: 8),
-            ...List.generate(steps.length, (idx) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 6.0),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${idx + 1}. ',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.blue,
+            Align(
+              alignment: Alignment.centerRight,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => AiChatScreen(
+                        initialPrompt:
+                            '「$title」を作りたいのですが、さらに美味しくするコツやアレンジ方法を教えて！',
                       ),
                     ),
-                    Expanded(
-                      child: Text(
-                        steps[idx].toString(),
-                        style: const TextStyle(fontSize: 14, height: 1.4),
-                      ),
-                    ),
-                  ],
+                  );
+                },
+                icon: const Icon(Icons.auto_awesome, size: 16),
+                label: const Text(
+                  'このレシピをAIに相談',
+                  style: TextStyle(fontSize: 12),
                 ),
-              );
-            }),
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder(
+      stream: _currentUserId.isNotEmpty
+          ? FirebaseFirestore.instance
+                .collection('posts')
+                .where('savedUsers', arrayContains: _currentUserId)
+                .snapshots()
+          : null,
+      builder: (context, savedSnap) {
+        final List savedAiRecipes = [];
+        final Map liveSavedIdByTitle = Map.from(_savedDocIdByTitle);
+
+        if (savedSnap.hasData && savedSnap.data != null) {
+          final docs = (savedSnap.data as QuerySnapshot).docs;
+          final List aiDocs = [];
+          for (final d in docs) {
+            final data = d.data() as Map;
+            final bool isAiRecipe =
+                data['mainCategory'] == 'AI' &&
+                (data['isRecipePost'] == true || data['subCategory'] == 'レシピ');
+            if (!isAiRecipe) continue;
+            aiDocs.add(d);
+            final t = (data['title'] ?? '').toString();
+            if (t.isNotEmpty) {
+              liveSavedIdByTitle[t] = d.id;
+            }
+          }
+
+          aiDocs.sort((a, b) {
+            final da = (a as QueryDocumentSnapshot).data() as Map;
+            final db = (b as QueryDocumentSnapshot).data() as Map;
+            final ta = da['createdAt'] as Timestamp?;
+            final tb = db['createdAt'] as Timestamp?;
+            if (ta == null && tb == null) return 0;
+            if (ta == null) return 1;
+            if (tb == null) return -1;
+            return tb.compareTo(ta);
+          });
+
+          for (final rawDoc in aiDocs) {
+            final doc = rawDoc as QueryDocumentSnapshot;
+            final data = doc.data() as Map;
+            savedAiRecipes.add({
+              'docId': doc.id,
+              'title': (data['title'] ?? 'AIレシピ').toString(),
+              'time': (data['recipeTime'] ?? '').toString(),
+              'cost': (data['recipeCost'] ?? '').toString(),
+              'servings': data['recipeServings'] ?? 1,
+              'ingredients': data['recipeIngredients'] is List
+                  ? List.from(data['recipeIngredients'])
+                  : [],
+              'steps': (data['recipeSteps'] ?? '').toString(),
+              'reason': '',
+            });
+          }
+        }
+
+        return Scaffold(
+          appBar: AppBar(
+            leading: IconButton(
+              icon: const Icon(Icons.menu),
+              onPressed: () => Scaffold.of(context).openDrawer(),
+            ),
+            title: const Text(
+              '自炊レシピ提案',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            bottom: TabBar(
+              controller: _tabController,
+              labelColor: Colors.blue,
+              unselectedLabelColor: Colors.grey,
+              indicatorColor: Colors.blue,
+              tabs: [
+                const Tab(text: '今日のおすすめ'),
+                Tab(text: '保存済み (${savedAiRecipes.length})'),
+              ],
+            ),
+          ),
+          body: TabBarView(
+            controller: _tabController,
+            children: [
+              SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 680),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text(
+                                    '今の気分でワンタップ提案',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                  TextButton.icon(
+                                    onPressed: _isLoadingRecipes
+                                        ? null
+                                        : () => _generateRecommendations(
+                                            forceRefresh:
+                                                _recipeStock.length < 3,
+                                          ),
+                                    icon: const Icon(Icons.refresh, size: 16),
+                                    label: const Text(
+                                      '別メニュー',
+                                      style: TextStyle(fontSize: 12),
+                                    ),
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 4,
+                                      ),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    for (final rawM in _moodChips)
+                                      Builder(
+                                        builder: (_) {
+                                          final m = rawM as Map;
+                                          final label = (m['label'] ?? '')
+                                              .toString();
+                                          final emoji = (m['emoji'] ?? '')
+                                              .toString();
+                                          final isSelected =
+                                              _selectedMood == label;
+                                          return Padding(
+                                            padding: const EdgeInsets.only(
+                                              right: 6.0,
+                                            ),
+                                            child: ChoiceChip(
+                                              label: Text(
+                                                '$emoji $label',
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                              selected: isSelected,
+                                              selectedColor:
+                                                  Colors.orange.shade100,
+                                              backgroundColor:
+                                                  Colors.grey.shade100,
+                                              onSelected: _isLoadingRecipes
+                                                  ? null
+                                                  : (_) {
+                                                      if (_selectedMood ==
+                                                          label) {
+                                                        return;
+                                                      }
+                                                      setState(() {
+                                                        _selectedMood = label;
+                                                      });
+                                                      _generateRecommendations(
+                                                        forceRefresh: true,
+                                                      );
+                                                    },
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => const AiChatScreen(),
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(
+                                    Icons.auto_awesome,
+                                    size: 16,
+                                    color: Colors.blue,
+                                  ),
+                                  label: const Text(
+                                    '冷蔵庫の余り物や細かい条件はAI相談へ',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildCommunitySection(),
+                        if (_isLoadingRecipes)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 40.0),
+                            child: Center(
+                              child: Column(
+                                children: [
+                                  CircularProgressIndicator(),
+                                  SizedBox(height: 12),
+                                  Text('今の気分と家電に合わせてレシピを考案中...'),
+                                ],
+                              ),
+                            ),
+                          )
+                        else if (_errorMessage.isNotEmpty)
+                          Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(24.0),
+                              child: Text(
+                                _errorMessage,
+                                style: const TextStyle(color: Colors.redAccent),
+                              ),
+                            ),
+                          )
+                        else
+                          for (final r in _recipes)
+                            Builder(
+                              builder: (_) {
+                                final rMap = r as Map;
+                                final t = (rMap['title'] ?? '').toString();
+                                return _buildRecipeCard(
+                                  recipe: rMap,
+                                  cardKey: 'rec_$t',
+                                  savedDocId: liveSavedIdByTitle[t]?.toString(),
+                                );
+                              },
+                            ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              savedAiRecipes.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'まだ保存したAIレシピはありません。\n気になるレシピの🔖を押すと保存フォルダにも追加されます！',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+                      itemCount: savedAiRecipes.length,
+                      itemBuilder: (context, idx) {
+                        final item = savedAiRecipes[idx] as Map;
+                        final docId = (item['docId'] ?? '').toString();
+                        return Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 680),
+                            child: _buildRecipeCard(
+                              recipe: item,
+                              cardKey: 'saved_$docId',
+                              savedDocId: docId,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
