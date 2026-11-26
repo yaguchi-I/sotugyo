@@ -1558,13 +1558,15 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
       });
     }
 
-    final filtered = _selectedHashtag.isEmpty
-        ? categoryDocs
-        : categoryDocs.where((d) {
-            final post = (d as QueryDocumentSnapshot).data() as Map;
-            final tags = SnsScreen.extractHashtagsFromPost(post);
-            return tags.contains(_selectedHashtag);
-          }).toList();
+    final filtered = _sortByNewest(
+      _selectedHashtag.isEmpty
+          ? categoryDocs
+          : categoryDocs.where((d) {
+              final post = (d as QueryDocumentSnapshot).data() as Map;
+              final tags = SnsScreen.extractHashtagsFromPost(post);
+              return tags.contains(_selectedHashtag);
+            }).toList(),
+    );
 
     final List mainList = [_all, ..._tagCategories.keys];
     final List subList = _tagMain == _all
@@ -1891,15 +1893,18 @@ class _SnsScreenState extends State with SingleTickerProviderStateMixin {
                   );
                   final isMatchedInterest = isRecommendedTab && score >= 2;
 
-                  return _buildPostCard(
-                    post: post,
-                    docId: doc.id,
-                    context: context,
-                    topicKey: topicKey,
-                    isTopicDemoted: isTopicDemoted,
-                    isMatchedInterest: isMatchedInterest,
-                    missingAppliances: missingAppliances,
-                    allergies: allergies,
+                  return KeyedSubtree(
+                    key: ValueKey(doc.id),
+                    child: _buildPostCard(
+                      post: post,
+                      docId: doc.id,
+                      context: context,
+                      topicKey: topicKey,
+                      isTopicDemoted: isTopicDemoted,
+                      isMatchedInterest: isMatchedInterest,
+                      missingAppliances: missingAppliances,
+                      allergies: allergies,
+                    ),
                   );
                 },
               ),

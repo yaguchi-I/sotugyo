@@ -8,7 +8,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import '../services/ai_knowledge_service.dart' show AiKnowledgeService;
 import 'ai_chat_screen.dart' show AiChatScreen;
 import 'sns_detail_screen.dart' show SnsDetailScreen;
-import '../widgets/top_toast.dart' show showReactionToast;
+import '../widgets/top_toast.dart' show showReactionToast, showTopToast;
 
 class CookingScreen extends StatefulWidget {
   const CookingScreen({super.key});
@@ -29,6 +29,7 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
   final Map _savedDocIdByTitle = {};
 
   List _cachedMissingAppliances = [];
+  List _cachedAllergies = [];
   List _cachedBlockedUsers = [];
   String _cachedUserArea = '日本';
 
@@ -91,6 +92,41 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     return '冬';
   }
 
+  int _parsePostCostYen(Map post) {
+    final est = AiKnowledgeService.readIntField(post['estimatedCost']);
+    if (est > 0) return est;
+    final raw = (post['recipeCost'] ?? '').toString().replaceAll(',', '');
+    final match = RegExp(r'(\d+)').firstMatch(raw);
+    if (match != null) {
+      return int.tryParse(match.group(1) ?? '0') ?? 0;
+    }
+    return 0;
+  }
+
+  List _filterSafeRecipes(List rawList) {
+    if (_cachedAllergies.isEmpty) return List.from(rawList);
+    final List safe = [];
+    for (final raw in rawList) {
+      if (raw is! Map) continue;
+      final title = (raw['title'] ?? '').toString();
+      final ingredients = raw['ingredients'] is List
+          ? List.from(raw['ingredients'])
+          : const [];
+      final steps = (raw['steps'] ?? '').toString();
+      final reason = (raw['reason'] ?? '').toString();
+      final bool hasAllergen = AiChatScreen.containsAllergenInRecipe(
+        title: title,
+        ingredients: ingredients,
+        steps: '$steps\n$reason',
+        allergies: _cachedAllergies,
+      );
+      if (!hasAllergen) {
+        safe.add(raw);
+      }
+    }
+    return safe;
+  }
+
   Future _loadUserProfileAndInitialRecipes() async {
     if (_currentUserId.isNotEmpty) {
       try {
@@ -106,6 +142,12 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
                 .map((e) => e.toString())
                 .toList();
           }
+          if (data['allergies'] is List) {
+            _cachedAllergies = List.from(data['allergies'])
+                .map((e) => e.toString().trim())
+                .where((e) => e.isNotEmpty)
+                .toList();
+          }
           if (data['blockedUsers'] is List) {
             _cachedBlockedUsers = List.from(data['blockedUsers'])
                 .map((e) => e.toString())
@@ -116,6 +158,198 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     }
 
     await _generateRecommendations(forceRefresh: true);
+  }
+
+  void _showAllergySettingsDialog() {
+    final List workingAllergies = List.from(_cachedAllergies);
+    final TextEditingController customCtrl = TextEditingController();
+    bool isSaving = false;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          void addCustom() {
+            final raw = customCtrl.text.trim();
+            if (raw.isEmpty) return;
+            final parts = raw
+                .split(RegExp(r'[\s 、,・/]+'))
+                .map((e) => e.trim())
+                .where((e) => e.isNotEmpty);
+            setDialogState(() {
+              for (final p in parts) {
+                if (!workingAllergies.contains(p)) {
+                  workingAllergies.add(p);
+                }
+              }
+              customCtrl.clear();
+            });
+          }
+
+          final List customList = workingAllergies
+              .where((a) => !AiChatScreen.presetAllergens.contains(a))
+              .toList();
+
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.no_food_outlined, color: Colors.redAccent),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'アレルギー・苦手食材の設定',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '選択した食材を含むレシピは、AI提案・みんなの人気レシピの両方から除外されます。',
+                      style: TextStyle(fontSize: 12, color: Colors.black54),
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final rawAllergen in AiChatScreen.presetAllergens)
+                          FilterChip(
+                            label: Text(rawAllergen.toString()),
+                            selected: workingAllergies.contains(
+                              rawAllergen.toString(),
+                            ),
+                            selectedColor: Colors.red.shade100,
+                            checkmarkColor: Colors.red.shade800,
+                            onSelected: isSaving
+                                ? null
+                                : (selected) {
+                                    final a = rawAllergen.toString();
+                                    setDialogState(() {
+                                      if (selected) {
+                                        if (!workingAllergies.contains(a)) {
+                                          workingAllergies.add(a);
+                                        }
+                                      } else {
+                                        workingAllergies.remove(a);
+                                      }
+                                    });
+                                  },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: customCtrl,
+                            decoration: const InputDecoration(
+                              hintText: 'その他（例：大豆、ごま、さば）',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (_) => addCustom(),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        OutlinedButton(
+                          onPressed: isSaving ? null : addCustom,
+                          child: const Text('追加'),
+                        ),
+                      ],
+                    ),
+                    if (customList.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final rawCustom in customList)
+                            InputChip(
+                              label: Text(
+                                rawCustom.toString(),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.red.shade900,
+                                ),
+                              ),
+                              backgroundColor: Colors.red.shade50,
+                              deleteIconColor: Colors.red.shade700,
+                              onDeleted: isSaving
+                                  ? null
+                                  : () {
+                                      setDialogState(() {
+                                        workingAllergies.remove(
+                                          rawCustom.toString(),
+                                        );
+                                      });
+                                    },
+                            ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: isSaving ? null : () => Navigator.pop(dialogContext),
+                child: const Text('キャンセル'),
+              ),
+              ElevatedButton(
+                onPressed: isSaving
+                    ? null
+                    : () async {
+                        if (customCtrl.text.trim().isNotEmpty) {
+                          addCustom();
+                        }
+                        setDialogState(() => isSaving = true);
+                        if (_currentUserId.isNotEmpty) {
+                          try {
+                            await FirebaseFirestore.instance
+                                .collection('users')
+                                .doc(_currentUserId)
+                                .set({
+                                  'allergies': workingAllergies,
+                                }, SetOptions(merge: true));
+                          } catch (e) {}
+                        }
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext);
+                        }
+                        if (!mounted) return;
+                        setState(() {
+                          _cachedAllergies = List.from(workingAllergies);
+                        });
+                        showTopToast(
+                          context,
+                          workingAllergies.isEmpty
+                              ? 'アレルギー除外設定を解除しました'
+                              : 'アレルギー除外（${workingAllergies.join('・')}）を保存しました',
+                        );
+                        _generateRecommendations(forceRefresh: true);
+                      },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('保存して再提案'),
+              ),
+            ],
+          );
+        },
+      ),
+    ).then((_) {
+      customCtrl.dispose();
+    });
   }
 
   Future _fetchCommunityPopularRecipes() async {
@@ -144,20 +378,50 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
         missingAppliances: _cachedMissingAppliances,
         currentUserId: _currentUserId,
         blockedUsers: _cachedBlockedUsers,
-        topK: 3,
+        topK: 8,
       );
 
       if (mounted && rawFound is List) {
+        final List filtered = [];
+        for (final raw in rawFound) {
+          if (raw is! Map) continue;
+          if (_selectedMood == '超節約(150円以下)') {
+            final int cost = _parsePostCostYen(raw);
+            if (cost > 300) continue;
+          }
+          if (_cachedAllergies.isNotEmpty) {
+            final List ingList = raw['recipeIngredients'] is List
+                ? List.from(raw['recipeIngredients'])
+                : const [];
+            final ingText = ingList
+                .where((e) => e is Map)
+                .map((e) => '${(e as Map)['name'] ?? ''} ${e['amount'] ?? ''}')
+                .join('\n');
+            final combined =
+                '${raw['title'] ?? ''}\n${raw['content'] ?? ''}\n$ingText\n${raw['recipeSteps'] ?? ''}';
+            if (AiChatScreen.containsAllergen(combined, _cachedAllergies)) {
+              continue;
+            }
+          }
+          filtered.add(raw);
+          if (filtered.length >= 3) break;
+        }
+
         setState(() {
           _communityRecipes
             ..clear()
-            ..addAll(rawFound);
+            ..addAll(filtered);
         });
       }
     } catch (e) {}
   }
 
   void _popThreeFromStock() {
+    final List safeStock = _filterSafeRecipes(_recipeStock);
+    _recipeStock
+      ..clear()
+      ..addAll(safeStock);
+
     final List nextThree = [];
     while (_recipeStock.isNotEmpty && nextThree.length < 3) {
       final item = _recipeStock.removeAt(0) as Map;
@@ -203,10 +467,41 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     return null;
   }
 
+  Future _requestRecipesFromAi({
+    required String currentKey,
+    required String prompt,
+  }) async {
+    for (final modelItem in AiChatScreen.fallbackModels) {
+      try {
+        final model = GenerativeModel(
+          model: modelItem.toString(),
+          apiKey: currentKey,
+          generationConfig: GenerationConfig(temperature: 0.75),
+        );
+        final res = await model
+            .generateContent([Content.text(prompt)])
+            .timeout(const Duration(seconds: 25));
+        if (res.text != null && res.text!.trim().isNotEmpty) {
+          final parsed = _parseRecipeListJson(res.text!);
+          if (parsed != null && parsed.isNotEmpty) {
+            return parsed;
+          }
+        }
+      } catch (e) {}
+    }
+    return null;
+  }
+
   Future _generateRecommendations({bool forceRefresh = false}) async {
-    if (!forceRefresh && _recipeStock.length >= 3) {
-      _popThreeFromStock();
-      return;
+    if (!forceRefresh) {
+      final List safeStock = _filterSafeRecipes(_recipeStock);
+      if (safeStock.length >= 3) {
+        _recipeStock
+          ..clear()
+          ..addAll(safeStock);
+        _popThreeFromStock();
+        return;
+      }
     }
 
     setState(() {
@@ -238,6 +533,7 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     final missingText = _cachedMissingAppliances.isEmpty
         ? '特になし'
         : _cachedMissingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(_cachedAllergies);
     final excludeTitlesText = _recentTitles.isEmpty
         ? 'なし'
         : _recentTitles.join('、');
@@ -248,7 +544,8 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
         '【条件】\n'
         '・季節: $_seasonLabel / 居住エリア気候目安: $_cachedUserArea\n'
         '・持っていない調理家電（絶対に使用禁止）: $missingText\n'
-        '・気分ルール: ${moodObj['rule']}\n'
+        '・【最重要・厳守】アレルギー・食べられない食材（材料・調味料・加工品含め1ミリも使用禁止）: $allergyRule\n'
+        '・気分ルール: ${moodObj['rule']}（ただしアレルギー禁止条件と矛盾する場合は、必ずアレルギー禁止条件を最優先すること）\n'
         '・スーパーで安く手に入る身近な食材を使うこと。\n'
         '・直近で提案済みの除外料理名: $excludeTitlesText\n'
         '・すべて1人分の分量と目安費用にすること（分量は数値を含めること）。\n\n'
@@ -264,39 +561,42 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
         '  }\n'
         ']';
 
-    List? generatedList;
-    for (final modelItem in AiChatScreen.fallbackModels) {
-      try {
-        final model = GenerativeModel(
-          model: modelItem.toString(),
-          apiKey: currentKey,
-          generationConfig: GenerationConfig(temperature: 0.75),
-        );
-        final res = await model
-            .generateContent([Content.text(prompt)])
-            .timeout(const Duration(seconds: 25));
-        if (res.text != null && res.text!.trim().isNotEmpty) {
-          final parsed = _parseRecipeListJson(res.text!);
-          if (parsed != null && parsed.isNotEmpty) {
-            generatedList = parsed;
-            break;
-          }
-        }
-      } catch (e) {}
+    final rawGenerated = await _requestRecipesFromAi(
+      currentKey: currentKey,
+      prompt: prompt,
+    );
+    List safeList = rawGenerated is List
+        ? _filterSafeRecipes(rawGenerated)
+        : [];
+
+    if (safeList.isEmpty && _cachedAllergies.isNotEmpty) {
+      final strictRetryPrompt =
+          '【絶対厳守】アレルギー対象（$allergyRule）およびその加工品・調味料を一切含まない、安全な一人暮らし向け自炊レシピを6品考案し、JSON配列のみで出力してください。\n'
+          '持っていない家電（$missingText）も使用禁止です。塩・ごま油・米・肉・魚・野菜など安全な素材を中心に組み立ててください。\n'
+          'フォーマット: [{"title":"料理名","time":"約10分","cost":"約180円","reason":"ポイント","ingredients":[{"name":"材料名","amount":"分量"}],"steps":"1. 手順"}]';
+      final retryGenerated = await _requestRecipesFromAi(
+        currentKey: currentKey,
+        prompt: strictRetryPrompt,
+      );
+      if (retryGenerated is List) {
+        safeList = _filterSafeRecipes(retryGenerated);
+      }
     }
 
     await communityFuture;
     if (!mounted) return;
 
-    if (generatedList != null && generatedList.isNotEmpty) {
+    if (safeList.isNotEmpty) {
       _recipeStock
         ..clear()
-        ..addAll(generatedList);
+        ..addAll(safeList);
       _popThreeFromStock();
     } else {
       setState(() {
         _isLoadingRecipes = false;
-        _errorMessage = 'レシピの作成に失敗しました。少し待ってから再度お試しください。';
+        _errorMessage = _cachedAllergies.isNotEmpty
+            ? 'アレルギー除外条件に合うレシピを作成できませんでした。別の気分を選ぶか再度お試しください。'
+            : 'レシピの作成に失敗しました。少し待ってから再度お試しください。';
       });
     }
   }
@@ -373,12 +673,13 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
     final missingText = _cachedMissingAppliances.isEmpty
         ? '特になし'
         : _cachedMissingAppliances.join('、');
+    final allergyRule = AiChatScreen.buildAllergyPromptRule(_cachedAllergies);
 
     final prompt = targetIngredient != null
         ? '料理「$dishTitle」（材料：$ingNames）を作る際、「$targetIngredient」が家にありません。\n'
-              '持っていない調理家電【$missingText】を使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、一人暮らしの家によくある身近な食材や調味料で「$targetIngredient」を代用する方法と分量の目安を、150文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。'
         : '料理「$dishTitle」（材料：$ingNames）について、\n'
-              '持っていない調理家電【$missingText】を使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
+              '持っていない調理家電【$missingText】と、アレルギー食材【$allergyRule】は絶対に使わず、さらに安く手軽に作れる代替食材やアレンジのコツを200文字以内で簡潔に教えてください。Markdown記号（*や#）は使わないでください。';
 
     String reply = '代用案を取得できませんでした。';
     for (final m in AiChatScreen.fallbackModels) {
@@ -392,6 +693,12 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
           break;
         }
       } catch (e) {}
+    }
+
+    if (_cachedAllergies.isNotEmpty &&
+        AiChatScreen.containsAllergen(reply, _cachedAllergies)) {
+      reply =
+          'アレルギー対象食材（${_cachedAllergies.join('・')}）に関連する表現が含まれたため表示を控えました。AI相談画面で使える手持ち食材を指定して聞いてみてください。';
     }
 
     if (!mounted) return;
@@ -888,6 +1195,13 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
               const SizedBox(height: 4),
               Text(steps, style: const TextStyle(fontSize: 14, height: 1.5)),
             ],
+            if (_cachedAllergies.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                '※除外設定（${_cachedAllergies.join('・')}）を反映済み。市販の調味料・加工品は必ず成分表示をご確認ください。',
+                style: TextStyle(fontSize: 10, color: Colors.orange.shade900),
+              ),
+            ],
             const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerRight,
@@ -984,6 +1298,18 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
               '自炊レシピ提案',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
+            actions: [
+              IconButton(
+                tooltip: 'アレルギー・苦手食材の設定',
+                icon: Icon(
+                  Icons.no_food_outlined,
+                  color: _cachedAllergies.isNotEmpty
+                      ? Colors.redAccent
+                      : Colors.black87,
+                ),
+                onPressed: _showAllergySettingsDialog,
+              ),
+            ],
             bottom: TabBar(
               controller: _tabController,
               labelColor: Colors.blue,
@@ -1006,6 +1332,55 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (_cachedAllergies.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10.0),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(10),
+                              onTap: _showAllergySettingsDialog,
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade50,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: Colors.red.shade200,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      Icons.no_food_outlined,
+                                      size: 16,
+                                      color: Colors.red.shade700,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        'アレルギー除外中: ${_cachedAllergies.join('・')}',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.red.shade900,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      '変更',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.red.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
@@ -1139,7 +1514,7 @@ class _CookingScreenState extends State with SingleTickerProviderStateMixin {
                                 children: [
                                   CircularProgressIndicator(),
                                   SizedBox(height: 12),
-                                  Text('今の気分と家電に合わせてレシピを考案中...'),
+                                  Text('今の気分と条件に合わせてレシピを考案中...'),
                                 ],
                               ),
                             ),
